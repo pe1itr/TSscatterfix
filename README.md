@@ -734,12 +734,6 @@ black in-memory frame; pass `--append` to keep the previous rolling capture.
 - Decoder-specific hacks.
 - GUI.
 
-## RDS-AI-Decoder Inspiration
-
-The directory `other_parties/RDS-AI-Decoder/` is reserved for placing the existing RDS-AI-Decoder software as a concept reference only.
-
-Do not copy code from that project into TSscatterfix without explicit license review. TSscatterfix remains standalone and does not take plugin dependencies from RDS/FMDX/TEF tooling. The relevant ideas are weighted voting, confidence tracking, historical memory, context-aware reconstruction, and explicit uncertainty per decision.
-
 ## Experimental Warning
 
 TSscatterfix version 1 is experimental. It is designed to avoid making corruption worse, but every repair decision is still heuristic. For critical workflows, keep original captures and compare decoder behavior before trusting repaired output.
