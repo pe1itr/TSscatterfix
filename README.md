@@ -595,6 +595,8 @@ Repaired `.mp4` files are still useful as visual reference material, but they ar
 --mode normal|contest
 --normal-mode
 --contest-mode
+--json-status
+--json-status-output PATH
 --verbose
 --dry-run
 --no-ml
@@ -637,6 +639,20 @@ When UDP output is used with `--input PATH` or shell redirection from a regular 
 `--mode normal` selects normal synchronous TS repair and is the default. `--normal-mode` is accepted as an explicit alias.
 
 `--mode contest` selects asynchronous recovered-view middleware for static DATV test images. `--contest-mode` is accepted as an alias. Version 1 uses a longer repeat-history window and reports contest-mode status in logs. Full recovered-image stream generation is planned; normal mode remains synchronous TS repair.
+
+In contest mode, TSscatterfix also keeps a bounded in-memory rolling store of recent TS payload fragments. The store records payload bytes plus context such as PID, packet index, payload-unit-start flag, continuity counter, TEI, scrambling flag, discontinuity flag, payload hash, payload length, and a conservative confidence value. This is the first C-side step toward later fragment voting/reconstruction; it does not create files and does not yet decode or reconstruct video frames.
+
+`--json-status` prints single-line machine-readable JSON status records to `stderr` whenever regular stats are printed, and once at shutdown. `stdout` remains reserved for binary TS output. The JSON includes packet counters, repair counters, PSI lock state, video/audio PIDs, and contest fragment-store counters. It is safe to use with stdout piping:
+
+```bash
+./tsscatterfix --udp-input 1234 --udp-output 127.0.0.1:1235 --mode contest --json-status
+```
+
+Use `--json-status-output PATH` to write those JSON status lines to a file instead of `stderr`:
+
+```bash
+./tsscatterfix --udp-input 1234 --udp-output 127.0.0.1:1235 --mode contest --json-status-output status.jsonl
+```
 
 `tools/contest_recover.py` is an offline prototype for contest captures. It requires
 `ffmpeg` and Python Pillow. It is useful for evaluating whether multiple damaged
@@ -688,6 +704,7 @@ black in-memory frame; pass `--append` to keep the previous rolling capture.
 - 188-byte MPEG-TS packet reading.
 - stdin/stdout, file, and UDP input/output.
 - Contest mode for asynchronous recovered-view static DATV test-card streams.
+- Bounded in-memory contest fragment store for recent payload fragments.
 - Sync byte validation and resync.
 - Dropping corrupt bytes before sync.
 - Per-PID continuity counter tracking.
@@ -703,6 +720,7 @@ black in-memory frame; pass `--append` to keep the previous rolling capture.
 - PID role confidence for PAT, PMT, VIDEO, AUDIO, PCR, NULL, UNKNOWN.
 - PCR/PES interval tracking and large-gap logging.
 - Periodic statistics to `stderr`.
+- Optional JSON status lines to `stderr`.
 - Repairability counters for invalid TS packets, TEI packets, PSI/SI cache replacements, and unrepairable TEI packets.
 - Repetition counters for repeated packets and payload fragments.
 

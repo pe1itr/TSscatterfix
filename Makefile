@@ -5,7 +5,7 @@ LDFLAGS ?=
 LDLIBS ?=
 
 TARGET := tsscatterfix
-SRCS := src/main.c src/io.c src/ts_packet.c src/ts_parser.c src/psi.c src/continuity.c src/ml_model.c src/repair.c src/stats.c
+SRCS := src/main.c src/io.c src/ts_packet.c src/ts_parser.c src/psi.c src/continuity.c src/ml_model.c src/repair.c src/stats.c src/contest.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(OBJS:.o=.d)
 

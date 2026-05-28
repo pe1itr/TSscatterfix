@@ -1,4 +1,5 @@
 #include "continuity.h"
+#include "contest.h"
 #include "io.h"
 #include "ml_model.h"
 #include "psi.h"
@@ -26,6 +27,7 @@ typedef struct {
     const char *udp_input_port;
     const char *udp_output_host_port;
     const char *ml_state_path;
+    const char *json_status_path;
     unsigned psi_interval_ms;
     unsigned stats_interval;
     unsigned max_packets;
@@ -42,6 +44,7 @@ typedef struct {
     int dry_run;
     int ml_enabled;
     int contest_mode;
+    int json_status;
     int normal_mode_seen;
     int contest_mode_seen;
 } Options;
@@ -77,6 +80,8 @@ static void usage(FILE *f) {
             "  --mode normal|contest   Select normal synchronous repair or contest recovered-view mode\n"
             "  --normal-mode           Explicitly select normal synchronous repair mode, default\n"
             "  --contest-mode          Async recovered-view mode for static DATV test images\n"
+            "  --json-status           Print machine-readable JSON status lines to stderr\n"
+            "  --json-status-output P  Write JSON status lines to file P instead of stderr\n"
             "  --verbose               Log repair decisions and parser events to stderr\n"
             "  --dry-run               Analyze but do not write TS output\n"
             "  --no-ml                 Disable probabilistic role inference\n"
@@ -168,6 +173,11 @@ static int parse_options(int argc, char **argv, Options *opt) {
             if (!select_mode(opt, 0)) return 0;
         } else if (strcmp(argv[i], "--contest-mode") == 0) {
             if (!select_mode(opt, 1)) return 0;
+        } else if (strcmp(argv[i], "--json-status") == 0) {
+            opt->json_status = 1;
+        } else if (strcmp(argv[i], "--json-status-output") == 0 && i + 1 < argc) {
+            opt->json_status = 1;
+            opt->json_status_path = argv[++i];
         } else if (strcmp(argv[i], "--verbose") == 0) {
             opt->verbose = 1;
         } else if (strcmp(argv[i], "--dry-run") == 0) {
@@ -466,6 +476,7 @@ int main(int argc, char **argv) {
 
     FILE *in_file = stdin;
     FILE *out_file = stdout;
+    FILE *json_status_file = stderr;
     TsInput input;
     TsOutput output;
     ts_input_init_file(&input, stdin);
@@ -511,6 +522,19 @@ int main(int argc, char **argv) {
             fprintf(stderr, "[io] udp_output target=%s\n", opt.udp_output_host_port);
         }
     }
+    if (opt.json_status_path) {
+        json_status_file = fopen(opt.json_status_path, "w");
+        if (!json_status_file) {
+            fprintf(stderr, "tsscatterfix: cannot open JSON status output '%s': %s\n",
+                    opt.json_status_path, strerror(errno));
+            ts_output_close(&output);
+            ts_input_close(&input);
+            if (out_file != stdout) fclose(out_file);
+            if (in_file != stdin) fclose(in_file);
+            ts_io_cleanup();
+            return 1;
+        }
+    }
     if (opt.udp_rate_kbit > 0) {
         ts_output_set_udp_rate(&output, opt.udp_rate_kbit);
         if (opt.verbose) {
@@ -534,6 +558,7 @@ int main(int argc, char **argv) {
     ContinuityContext continuity;
     MlModel ml;
     RepairContext repair;
+    ContestContext contest;
     TsReader reader;
     uint8_t raw[TS_PACKET_SIZE];
     uint8_t clean_cc_valid[TS_PID_COUNT] = {0};
@@ -546,6 +571,7 @@ int main(int argc, char **argv) {
     stats_init(&stats);
     psi_init(&psi);
     continuity_init(&continuity);
+    contest_init(&contest);
     ml_model_init(&ml, opt.ml_enabled, opt.contest_mode, opt.ml_state_path);
     if (opt.contest_mode && opt.verbose) {
         fprintf(stderr, "[contest] mode=enabled timing=async_recovered_view assumption=static_test_image repeat_window=%u payload_repair=planned\n",
@@ -632,6 +658,9 @@ int main(int argc, char **argv) {
 
         continuity_observe(&continuity, &pkt, &stats, opt.verbose);
         psi_observe_packet(&psi, &pkt, stats.packets_read, opt.verbose);
+        if (opt.contest_mode) {
+            contest_observe_packet(&contest, &pkt, &psi, stats.packets_read);
+        }
         ml_model_observe(&ml, &pkt, &psi, &stats, stats.packets_read, opt.verbose);
 
         if (opt.clean_ts && !opt.passthrough && !clean_ts_pid_allowed(&psi, pkt.pid, opt.drop_audio)) {
@@ -673,6 +702,10 @@ int main(int argc, char **argv) {
         if (opt.stats_interval > 0 && stats.packets_read % opt.stats_interval == 0) {
             stats_print(stderr, &stats, &psi, ++stats_index);
             ml_model_print_roles(stderr, &ml, &psi);
+            if (opt.json_status) {
+                contest_print_json(json_status_file, &contest, &stats, &psi, stats_index);
+                fflush(json_status_file);
+            }
         }
         if (opt.max_packets > 0 && stats.packets_read >= opt.max_packets) {
             break;
@@ -683,6 +716,10 @@ int main(int argc, char **argv) {
         stats_print(stderr, &stats, &psi, ++stats_index);
         ml_model_print_roles(stderr, &ml, &psi);
     }
+    if (opt.json_status) {
+        contest_print_json(json_status_file, &contest, &stats, &psi, stats_index);
+        fflush(json_status_file);
+    }
     if (ml_model_save(&ml) < 0) {
         fprintf(stderr, "tsscatterfix: cannot save ML state '%s': %s\n", opt.ml_state_path, strerror(errno));
     }
@@ -692,6 +729,7 @@ int main(int argc, char **argv) {
     }
     ts_output_close(&output);
     ts_input_close(&input);
+    if (json_status_file && json_status_file != stderr) fclose(json_status_file);
     if (out_file && out_file != stdout) fclose(out_file);
     if (in_file && in_file != stdin) fclose(in_file);
     ts_io_cleanup();
