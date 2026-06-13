@@ -21,7 +21,7 @@ from PIL import ImageStat
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
-YELLOW = "\033[93m"
+YELLOW = "\033[38;5;226m"
 RESET = "\033[0m"
 
 
