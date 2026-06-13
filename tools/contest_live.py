@@ -21,6 +21,8 @@ from PIL import ImageStat
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
+YELLOW = "\033[33m"
+RESET = "\033[0m"
 
 
 class SharedFrame:
@@ -344,6 +346,12 @@ def service_info_text(info: dict[str, object]) -> str:
     return " ".join(parts)
 
 
+def color_service_line(line: str, service_text: str) -> str:
+    if sys.stderr.isatty() and ("service_name=" in service_text or "provider_name=" in service_text):
+        return f"{YELLOW}{line}{RESET}"
+    return line
+
+
 def image_quality(path: Path) -> float:
     if path.stat().st_size < 1024:
         return 0.0
@@ -607,7 +615,8 @@ def main() -> int:
                 packets = count_ts_packets(capture)
                 service_text = service_info_text(scan_service_info(capture))
                 if service_text and service_text != last_service_text:
-                    print(f"[live] service{timing_text(started_at, first_input_at)} {service_text}", file=sys.stderr)
+                    service_line = f"[live] service{timing_text(started_at, first_input_at)} {service_text}"
+                    print(color_service_line(service_line, service_text), file=sys.stderr)
                     last_service_text = service_text
                 if packets < args.min_packets:
                     print(
