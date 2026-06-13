@@ -232,7 +232,7 @@ decoder_command \
     --output-size 640x360
 ```
 
-HEVC test-card use when short openings make PMT detection unreliable:
+Live use with a known video PID but automatic codec selection:
 
 ```bash
 decoder_command \
@@ -243,8 +243,13 @@ decoder_command \
     --output-fps 1 \
     --output-size 640x360 \
     --video-pid 0x0100 \
-    --codec h265
+    --codec auto
 ```
+
+`--codec auto` starts with the H.264 parser and switches when PMT advertises a
+supported video stream type, for example `0x24` for H.265/HEVC. Use an explicit
+`--codec h264` or `--codec h265` only when PMT is missing or known to be
+unreliable.
 
 Open a player in another terminal:
 
