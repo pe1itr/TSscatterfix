@@ -480,10 +480,16 @@ Probe whether a capture has enough H.264 evidence for contest recovery:
 tools/contest_probe.py --input example/linrad_20260516_220739_150k.ts
 ```
 
-Build H.264 IDR fragment candidates and decode them to PNGs:
+Build H.264/H.265 keyframe fragment candidates and decode them to PNGs:
 
 ```bash
 tools/contest_fragment_vote.py --input example/linrad_20260516_220739_150k.ts --output-dir /tmp/linrad_fragments --decode
+```
+
+For HEVC/H.265 DATV streams, force the codec when needed:
+
+```bash
+tools/contest_fragment_vote.py --input capture.ts --output-dir /tmp/hevc_fragments --video-pid 0x0100 --codec h265 --decode --vote
 ```
 
 Multiple captures can be ranked together by repeating `--input`:
@@ -492,8 +498,8 @@ Multiple captures can be ranked together by repeating `--input`:
 tools/contest_fragment_vote.py --input example/linrad_20260516_220739_150k.ts --input example/linrad_20260516_221341_150k.ts --output-dir /tmp/linrad_fragments_combined --decode
 ```
 
-Add `--vote` to also create byte-voted `.h264` candidates from similarly sized
-IDR slices:
+Add `--vote` to also create byte-voted `.h264` or `.h265` candidates from
+similarly sized keyframe slices:
 
 ```bash
 tools/contest_fragment_vote.py --input example/linrad_20260516_220739_150k.ts --input example/linrad_20260516_221341_150k.ts --output-dir /tmp/linrad_fragments_voted --decode --vote
@@ -549,9 +555,42 @@ decoder_command \
 
 Open VLC/ffplay on `udp://@:1235`.
 
-This uses TSscatterfix for TS cleanup, ffmpeg for H.264 decoding, and then combines
-decoded frames into one PNG plus a confidence mask. It only preserves observed
-image evidence; unseen parts of a callsign are not invented.
+If PAT/PMT detection is unreliable during very short openings, force the known
+video PID and codec. For example, a DVB-S 125 ksym/s HEVC test-card service with
+video on PID `0x0100` can be run as:
+
+```bash
+decoder_command \
+| tools/contest_live.py \
+    --work-dir temp/live \
+    --model temp/linrad_fragments_5way_conf/model_combined.json \
+    --udp-output 127.0.0.1:1235 \
+    --output-fps 1 \
+    --output-size 640x360 \
+    --video-pid 0x0100 \
+    --codec h265
+```
+
+The live prototype logs service metadata as soon as PAT/PMT/SDT are seen:
+
+```text
+[live] service ... service_id=1 service_name=PE1ORG provider_name=0201 pmt_pid=0x1000 pcr_pid=0x0100 video=0x0100/0x24 audio=0x0101/0x0f
+```
+
+Useful recovery milestones are:
+
+```text
+codec=h265 ... vps=yes sps=yes pps=yes
+[live] best_update ... frame_version=1
+```
+
+`temp/live/best.png` is updated on each accepted best frame. The UDP stream is a
+low-rate MPEG-TS stream intended for VLC/ffplay; the current output helper uses
+MPEG-2 video for broad VLC compatibility.
+
+This uses TSscatterfix for TS cleanup, ffmpeg for codec decoding, and then
+selects the best decoded still frame. It only preserves observed image evidence;
+unseen parts of a callsign are not invented.
 
 VLC example:
 
@@ -667,13 +706,14 @@ missing keyframes, or mainly missing fragments that may be recoverable from more
 passes.
 
 `tools/contest_fragment_vote.py` is a first fragment-level experiment. It accepts
-one or more `--input` captures, extracts H.264 access units from the video PID,
-keeps observed SPS/PPS headers, ranks IDR access units by available slice data and
-continuity quality, and writes candidate `.h264` elementary streams. With
-`--decode`, ffmpeg also writes PNGs for visual inspection. With `--vote`, it also
-groups similarly sized IDR slices and writes byte-voted candidate streams. This is
-intentionally still a conservative candidate generator, not a full H.264 repair
-engine.
+one or more `--input` captures, extracts H.264 or H.265 access units from the
+video PID, keeps observed codec headers, ranks keyframe access units by available
+slice data and continuity quality, and writes candidate `.h264` or `.h265`
+elementary streams. Use `--codec auto|h264|h265` and `--video-pid 0xNNNN` when
+PAT/PMT evidence is incomplete. With `--decode`, ffmpeg also writes PNGs for
+visual inspection. With `--vote`, it also groups similarly sized keyframe slices
+and writes byte-voted candidate streams. This is intentionally still a
+conservative candidate generator, not a full codec repair engine.
 
 The ranking includes deterministic TS confidence features: continuity behaviour,
 scrambling bits, adaptation-field validity, payload entropy, and logical PES
@@ -693,11 +733,12 @@ weighting.
 
 `tools/contest_live.py` is the first streaming prototype. It reads MPEG-TS bytes
 from stdin into a rolling capture, periodically runs the same fragment/ML ranking
-path, and keeps the current best decoded frame in process memory. With
-`--udp-output HOST:PORT`, it starts ffmpeg as an output helper, feeds it the
-current best image as raw RGB frames over stdin, and ffmpeg encodes/muxes a
-continuous MPEG-TS UDP stream for VLC/ffplay. Each fresh run starts with a blank
-black in-memory frame; pass `--append` to keep the previous rolling capture.
+path, logs service metadata from PAT/PMT/SDT, and keeps the current best decoded
+frame in process memory. With `--udp-output HOST:PORT`, it starts ffmpeg as an
+output helper, feeds it the current best image as raw RGB frames over stdin, and
+ffmpeg encodes/muxes a continuous MPEG-TS UDP stream for VLC/ffplay. Each fresh
+run starts with a blank black in-memory frame; pass `--append` to keep the
+previous rolling capture.
 
 ## Implemented In Version 1
 
@@ -723,13 +764,15 @@ black in-memory frame; pass `--append` to keep the previous rolling capture.
 - Optional JSON status lines to `stderr`.
 - Repairability counters for invalid TS packets, TEI packets, PSI/SI cache replacements, and unrepairable TEI packets.
 - Repetition counters for repeated packets and payload fragments.
+- Experimental H.264/H.265 contest keyframe extraction and still-frame candidate decoding in `tools/`.
+- Experimental live recovered-frame UDP output in `tools/contest_live.py`.
 
 ## Not Implemented In Version 1
 
 - Neural networks.
 - TensorFlow, ONNX, or similar runtimes.
 - Reed-Solomon, Viterbi, LDPC, or demodulator-level decoding.
-- H.264/H.265 frame reconstruction.
+- General H.264/H.265 frame reconstruction for arbitrary moving video.
 - PCR rewriting.
 - Decoder-specific hacks.
 - GUI.
