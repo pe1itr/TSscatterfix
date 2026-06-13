@@ -268,9 +268,14 @@ Recovery status examples:
 
 ```text
 [live] analyze=no_candidate ... detail=no_idr au=120 codec=h265 key=0 vps=yes sps=yes pps=yes
+[live] analyze=no_candidate ... detail=no_video_pid codec_warning=pid=0x0100 stream_type=0x24 pmt_codec=h265 ignored_by_selected_codec=h264 hint=--codec h265
 [live] best_update ... score=2.313 packets=777 frame_version=1
 [live] best_keep ... score=2.313 candidate=2.313 packets=931
 ```
+
+`codec_warning` means PMT advertised a video codec that does not match the
+selected analyzer codec, or advertised a known video codec that is not supported
+by the fragment tool.
 
 `best_update` means a decoded still frame was accepted and is being repeated on
 the output stream. `best_keep` means a later candidate did not improve the

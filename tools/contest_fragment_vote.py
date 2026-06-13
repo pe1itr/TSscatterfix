@@ -75,6 +75,16 @@ CODECS = {
     ),
 }
 
+STREAM_TYPE_CODECS = {
+    0x02: "mpeg2video",
+    0x10: "mpeg4video",
+    0x1B: "h264",
+    0x24: "h265",
+    0x27: "h266",
+}
+
+SUPPORTED_STREAM_TYPES = {stream_type for spec in CODECS.values() for stream_type in spec.stream_types}
+
 
 @dataclass
 class AccessUnit:
@@ -286,21 +296,28 @@ def parse_pat(section: bytes) -> int | None:
     return None
 
 
-def parse_pmt(section: bytes, codec_arg: str) -> tuple[int, str] | None:
+def pmt_streams(section: bytes) -> list[tuple[int, int]]:
     if not section or section[0] != 0x02 or len(section) < 16:
-        return None
+        return []
     section_len = ((section[1] & 0x0F) << 8) | section[2]
     end = 3 + section_len - 4
     program_info_len = ((section[10] & 0x0F) << 8) | section[11]
     pos = 12 + program_info_len
+    streams: list[tuple[int, int]] = []
     while pos + 5 <= end:
         stream_type = section[pos]
         pid = ((section[pos + 1] & 0x1F) << 8) | section[pos + 2]
         es_info_len = ((section[pos + 3] & 0x0F) << 8) | section[pos + 4]
+        streams.append((stream_type, pid))
+        pos += 5 + es_info_len
+    return streams
+
+
+def parse_pmt(section: bytes, codec_arg: str) -> tuple[int, str, int] | None:
+    for stream_type, pid in pmt_streams(section):
         for name, spec in CODECS.items():
             if codec_arg in ("auto", name) and stream_type in spec.stream_types:
-                return pid, name
-        pos += 5 + es_info_len
+                return pid, name, stream_type
     return None
 
 
@@ -351,6 +368,13 @@ def read_access_units(path: Path, video_pid_arg: int | None, codec_arg: str) -> 
     current_pes = bytearray()
     access_units: list[AccessUnit] = []
     best_headers: dict[int, bytes] = {}
+    warnings_seen: set[str] = set()
+
+    def warn_once(key: str, message: str) -> None:
+        if key in warnings_seen:
+            return
+        warnings_seen.add(key)
+        print(f"[fragment] codec_warning {message}")
 
     def finish_current() -> None:
         nonlocal current, current_pes
@@ -381,9 +405,31 @@ def read_access_units(path: Path, video_pid_arg: int | None, codec_arg: str) -> 
         elif pmt_pid is not None and pid == pmt_pid and has_payload:
             section = section_from_payload(pkt, info)
             if section:
+                for stream_type, stream_pid in pmt_streams(section):
+                    observed_codec = STREAM_TYPE_CODECS.get(stream_type)
+                    if stream_type in SUPPORTED_STREAM_TYPES:
+                        supported_codec = next(name for name, spec in CODECS.items() if stream_type in spec.stream_types)
+                        if video_pid == stream_pid and codec_arg != "auto" and codec_arg != supported_codec:
+                            warn_once(
+                                f"mismatch:{stream_pid}:{stream_type}:{codec_arg}",
+                                f"pid=0x{stream_pid:04x} stream_type=0x{stream_type:02x} "
+                                f"pmt_codec={supported_codec} selected_codec={codec_arg} hint=--codec {supported_codec}",
+                            )
+                        elif video_pid is None and codec_arg != "auto" and codec_arg != supported_codec:
+                            warn_once(
+                                f"ignored-supported:{stream_pid}:{stream_type}:{codec_arg}",
+                                f"pid=0x{stream_pid:04x} stream_type=0x{stream_type:02x} "
+                                f"pmt_codec={supported_codec} ignored_by_selected_codec={codec_arg} hint=--codec {supported_codec}",
+                            )
+                    elif observed_codec:
+                        warn_once(
+                            f"unsupported:{stream_pid}:{stream_type}",
+                            f"pid=0x{stream_pid:04x} stream_type=0x{stream_type:02x} "
+                            f"pmt_codec={observed_codec} supported_codecs=h264,h265",
+                        )
                 parsed = parse_pmt(section, codec_arg)
                 if parsed:
-                    parsed_pid, parsed_codec = parsed
+                    parsed_pid, parsed_codec, _stream_type = parsed
                     if video_pid is None:
                         video_pid = parsed_pid
                     if video_pid == parsed_pid and codec_arg == "auto":

@@ -99,6 +99,7 @@ def summarize_analysis_log(log: str) -> str:
     features_rows = None
     ffmpeg_missing = False
     vote_no_groups = False
+    codec_warnings: list[str] = []
     error = ""
     low_quality = ""
 
@@ -121,6 +122,8 @@ def summarize_analysis_log(log: str) -> str:
                     pps = part.split("=", 1)[1]
         elif line.startswith("[fragment] candidate="):
             candidates += 1
+        elif line.startswith("[fragment] codec_warning "):
+            codec_warnings.append(line.split(" ", 2)[2])
         elif line.startswith("[vote] candidate="):
             voted_candidates += 1
         elif line.startswith("[vote] no groups"):
@@ -142,7 +145,10 @@ def summarize_analysis_log(log: str) -> str:
             error = "no_video_pid"
 
     if error:
-        return error
+        parts = [error]
+        for warning in codec_warnings[:2]:
+            parts.append(f"codec_warning={warning}")
+        return " ".join(parts)
     if ffmpeg_missing:
         return "ffmpeg_missing"
     if access_units == "0":
@@ -182,6 +188,8 @@ def summarize_analysis_log(log: str) -> str:
         parts.append(f"features={features_rows}")
     if vote_no_groups:
         parts.append("vote_groups=0")
+    for warning in codec_warnings[:2]:
+        parts.append(f"codec_warning={warning}")
     return " ".join(parts)
 
 
