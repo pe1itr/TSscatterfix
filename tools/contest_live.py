@@ -346,6 +346,17 @@ def service_info_text(info: dict[str, object]) -> str:
     return " ".join(parts)
 
 
+def first_video_pid(info: dict[str, object]) -> int | None:
+    video = info.get("video")
+    if not isinstance(video, str) or not video:
+        return None
+    first = video.split(",", 1)[0].split("/", 1)[0]
+    try:
+        return int(first, 16)
+    except ValueError:
+        return None
+
+
 def color_service_line(line: str, service_text: str) -> str:
     if sys.stderr.isatty() and ("service_name=" in service_text or "provider_name=" in service_text):
         return f"{YELLOW}{line}{RESET}"
@@ -613,11 +624,19 @@ def main() -> int:
                 out.flush()
                 trim_capture(capture, max_bytes)
                 packets = count_ts_packets(capture)
-                service_text = service_info_text(scan_service_info(capture))
+                service_info = scan_service_info(capture)
+                service_text = service_info_text(service_info)
                 if service_text and service_text != last_service_text:
                     service_line = f"[live] service{timing_text(started_at, first_input_at)} {service_text}"
                     print(color_service_line(service_line, service_text), file=sys.stderr)
                     last_service_text = service_text
+                    service_video_pid = first_video_pid(service_info)
+                    if args.video_pid is not None and service_video_pid is not None and args.video_pid != service_video_pid:
+                        print(
+                            f"[live] video_pid_warning{timing_text(started_at, first_input_at)} "
+                            f"forced=0x{args.video_pid:04x} pmt=0x{service_video_pid:04x} hint=remove --video-pid or set --video-pid 0x{service_video_pid:04x}",
+                            file=sys.stderr,
+                        )
                 if packets < args.min_packets:
                     print(
                         f"[live]{timing_text(started_at, first_input_at)} packets={packets} waiting_min={args.min_packets}",
