@@ -4,6 +4,136 @@ Operational notes for weak-signal DATV/TSscatterfix contacts. New connection
 entries should follow `CONNECTION_ANALYSIS_WORKFLOW.md` so each QSO also
 captures software optimization evidence.
 
+## 2026-06-14 - ON1AFB / latest TS detection
+
+- Counterstation: ON1AFB
+- Logged: 2026-06-14 14:05 CEST
+- Latest detection artifacts: `temp/live/`
+- Capture analyzed: `temp/live/rolling.ts`
+- Best recovered frame: `temp/live/best.png`
+- Live analysis log: `temp/live/live.log`
+- Path condition: very fast aircraft-scatter peaks; the QPSK demodulator had
+  difficulty maintaining a stable transport stream during the short bursts.
+  The signal was weakly present in the waterfall most of the time. Occasional
+  aircraft-scatter peaks raised it, but moving notches across the passband
+  caused fast flutter; some peaks produced only about 10 TS packets. Recovery
+  depended on a favorable reflection that lasted long enough, or became strong
+  enough, for the flutter to be dominated by signal strength.
+
+### TS Detection
+
+Analysis checked on 2026-06-14 14:01-14:05 CEST with:
+
+```bash
+./tsscatterfix --input temp/live/rolling.ts --dry-run --verbose --json-status --stats-interval 50 --mode contest
+tools/contest_fragment_vote.py --input temp/live/rolling.ts --output-dir /tmp/tsscatterfix_connection_analysis --codec auto --decode --features-csv /tmp/tsscatterfix_connection_analysis/features.csv --max-candidates 8 --vote
+tools/contest_probe.py --input temp/live/rolling.ts
+```
+
+Detected transport/service structure:
+
+- TS packets read: 777
+- PAT detected: yes
+- PMT detected: yes, PMT PID `0x00ff`
+- SDT detected: yes
+- SDT provider: `Portsdown 4`
+- SDT service name: `ON1AFB`
+- PCR PID: `0x0100`
+- Video PID: `0x0100`
+- Audio PID: `0x0101`
+- Codec selected by fragment analysis: H.264/AVC
+
+Signal/packet quality evidence:
+
+- Invalid TS headers: 40
+- TEI packets: 25
+- Continuity errors: 88
+- Missing packets by continuity counter: 231
+- Duplicates/out-of-order: 5/26
+- Contest fragments seen/stored: 717/717
+- Video fragments classified by contest mode: 531
+- PSI fragments classified by contest mode: 74
+- Repeated packet candidates: 149
+- Repeated payload candidates: 192
+- H.264 probe saw 534 video PID packets, 92 PES starts, 32 video continuity
+  errors, 75 video missing-by-CC, 2 video duplicates, and 12 video out-of-order
+  packets.
+
+Codec/keyframe evidence:
+
+- Access units from fragment analysis: 93
+- IDR/key units: 6
+- SPS present: yes
+- PPS present: yes
+- Decode trigger reached: yes, `SPS + PPS + IDR`
+- The first available IDR decoded only to a uniform gray frame; later clean
+  keyframes recovered the test card.
+
+Frame progression:
+
+- AU 24: IDR, score 4692, confidence 0.863, 28 packets, 4776 slice bytes,
+  2 CC errors, 6 missing packets, 1 out-of-order packet, decode ok but visual
+  state is blank/uniform gray.
+- AU 39: IDR, score 9972, confidence 0.902, 44 packets, 7707 slice bytes,
+  0 CC errors, 0 missing packets, 0 out-of-order packets, decode ok; full
+  readable ON1AFB still frame and selected by the live analyzer.
+- AU 49: IDR, score 7991, confidence 0.903, 35 packets, 6187 slice bytes,
+  clean packet metrics, decode ok but visually partial/vertically smeared.
+- AU 67: IDR, score 4687, confidence 0.854, 26 packets, 4334 slice bytes,
+  3 CC errors, 2 missing packets, 2 out-of-order packets, decode ok but visual
+  state is blank/uniform gray.
+- AU 77: IDR, score 9497, confidence 0.902, 42 packets, 7334 slice bytes,
+  clean packet metrics, decode ok; full readable frame matching AU 39.
+- AU 92: IDR, score 1761, confidence 0.913, 8 packets, 1339 slice bytes,
+  clean packet metrics but too little slice data; decode ok but blank/uniform
+  gray.
+
+Frames available:
+
+- `temp/live/best.png`: live-selected readable frame from AU 39.
+- `/tmp/tsscatterfix_connection_analysis/candidate_01_rolling_au_039.png`:
+  readable full frame.
+- `/tmp/tsscatterfix_connection_analysis/candidate_02_rolling_au_077.png`:
+  readable full frame matching AU 39.
+- `/tmp/tsscatterfix_connection_analysis/candidate_03_rolling_au_049.png`:
+  partial/smeared frame.
+
+Recovered image observation:
+
+- The recovered frame visibly contains `ON1AFB`.
+- The large received number is `4362`; the same number appears small at the top
+  right.
+- The locator line is `JO10QS`.
+- The band/frequency text is `70_cm`.
+
+Optimization notes:
+
+- The early decode trigger behaved correctly: it tried as soon as
+  `SPS + PPS + IDR` was present, but the quality gate rejected the first uniform
+  gray frame.
+- The connection demonstrates bursty aircraft-scatter behavior: useful keyframe
+  evidence arrived in short peaks, while the QPSK demodulator produced many TS
+  continuity gaps and invalid headers between peaks.
+- Very short RF peaks may only contribute a handful of TS packets. Contest mode
+  should keep collecting these bursts, but only accept a frame when a favorable
+  reflection provides enough continuous keyframe bytes to overcome flutter.
+- Do not lower the image-quality threshold for this case; it prevented a blank
+  gray frame from becoming the held best frame.
+- Candidate ranking worked well once clean keyframes arrived: AU 39 and AU 77
+  had zero candidate packet errors and full readable images, while damaged or
+  too-short IDRs decoded to blank/partial frames.
+- For this type of fast aircraft-scatter path, continue aggressive startup
+  analysis but hold the best readable frame through later short or blank
+  keyframes.
+
+Conclusion:
+
+- This latest TS detection is valid ON1AFB QSO evidence.
+- Best readable content: `ON1AFB`, report/number `4362`, locator `JO10QS`,
+  band `70_cm`.
+- The main limiting factor was not lack of codec anchors but burst instability
+  in the demodulated QPSK stream during fast aircraft-scatter peaks.
+
 ## 2026-06-14 - F5RZC / latest TS detection
 
 - Counterstation: F5RZC
