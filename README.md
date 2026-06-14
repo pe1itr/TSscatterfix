@@ -17,6 +17,10 @@ This live still-frame path has already been used to complete multiple weak-signa
 DATV contest contacts where ordinary playback did not hold long enough for a
 stable picture.
 
+Operational contact notes are kept in `QSO_LOG.md`. The fixed procedure for
+analyzing connection evidence is documented in
+`CONNECTION_ANALYSIS_WORKFLOW.md`.
+
 ## What It Repairs
 
 TSscatterfix is strongest at repeated transport metadata and packet structure:
