@@ -4,6 +4,144 @@ Operational notes for weak-signal DATV/TSscatterfix contacts. New connection
 entries should follow `CONNECTION_ANALYSIS_WORKFLOW.md` so each QSO also
 captures software optimization evidence.
 
+## 2026-06-14 - ON4VVV / latest TS detection
+
+- Counterstation: ON4VVV
+- Logged: 2026-06-14 17:38 CEST
+- Latest detection artifacts: `temp/live/`
+- Capture analyzed: `temp/live/rolling.ts`
+- Preserved capture analyzed: `captures/on4vvv_2026-06-14_173335_rolling.ts`
+- Best recovered frame: `captures/on4vvv_2026-06-14_173048_best.png`
+- Selected clean keyframe candidate: `captures/on4vvv_2026-06-14_173335_candidate_au105.h264`
+- Selected clean keyframe image: `captures/on4vvv_2026-06-14_173335_candidate_au105.png`
+- Live analysis log: `temp/live/live.log`
+- Operating note: contact reported on 51.7 MHz; recovered frame confirms
+  `51.7` in the station card.
+
+### TS Detection
+
+Analysis checked on 2026-06-14 17:35-17:38 CEST with:
+
+```bash
+./tsscatterfix --input temp/live/rolling.ts --dry-run --verbose --json-status --stats-interval 50 --mode contest
+tools/contest_fragment_vote.py --input temp/live/rolling.ts --output-dir /tmp/tsscatterfix_on4vvv_analysis --codec auto --decode --features-csv /tmp/tsscatterfix_on4vvv_analysis/features.csv --max-candidates 12 --vote
+tools/contest_probe.py --input temp/live/rolling.ts
+```
+
+Detected transport/service structure:
+
+- TS packets read: 6601
+- PAT detected: yes
+- PMT detected: yes, PMT PID `0x00ff`
+- SDT detected: yes
+- SDT provider: `Portsdown 4`
+- SDT service name: `ON4VVV`
+- PCR PID: `0x0100`
+- Video PID: `0x0100`
+- Audio PID: `0x0101`
+- PMT stream types: H.264/AVC video `0x1b` on PID `0x0100`, AAC audio
+  `0x0f` on PID `0x0101`
+- Codec selected by fragment analysis: H.264/AVC
+
+Signal/packet quality evidence:
+
+- Invalid TS headers: 42
+- TEI packets: 27 in the main parser; H.264 probe saw 0 TEI packets on the
+  selected video PID
+- Continuity errors: 194 overall
+- Missing packets by continuity counter: 516 overall
+- Duplicates/out-of-order: 7/42 overall
+- Contest fragments seen/stored: 6525/4096
+- Video fragments classified by contest mode: 5352
+- PSI fragments classified by contest mode: 615
+- Repeated packet candidates: 1422
+- Repeated payload candidates: 1901
+- H.264 probe saw 5383 video PID packets, 877 PES starts, 68 video continuity
+  errors, 147 video missing-by-CC, 3 video duplicates, and 24 video
+  out-of-order packets.
+
+Codec/keyframe evidence:
+
+- Access units from fragment analysis: 878
+- IDR/key units: 88
+- SPS present: yes
+- PPS present: yes
+- Decode trigger reached: yes, `SPS + PPS + IDR`
+- NAL evidence from probe: 789 non-IDR slices, 88 IDR slices, 877 SEI units,
+  93 SPS units, and 93 PPS units.
+- A long repeated still-card pattern was present. The clean repeated frame
+  group had 44 members with identical 8229-byte IDR payloads and zero candidate
+  packet errors.
+
+Frame progression:
+
+- AU 2: IDR, score 3257, confidence 0.907, 15 packets, 2477 slice bytes,
+  clean packet metrics; early partial keyframe.
+- AU 70: IDR, score 9040, confidence 0.893, 40 packets, 7091 slice bytes,
+  1 CC error; decodes to a mostly readable station card.
+- AU 85: IDR, score 8948, confidence 0.903, 40 packets, 6888 slice bytes,
+  clean packet metrics; readable but lower score than the later full stills.
+- AU 105: IDR, score 10648, confidence 0.902, 47 packets, 8229 slice bytes,
+  clean packet metrics; full readable ON4VVV frame and selected as the
+  preserved direct candidate.
+- AU 125/129: IDR, same score/confidence/packet metrics as AU 105; repeated
+  full readable still frames.
+- AU 141: IDR, score 12384, confidence 0.881, 58 packets, 10189 slice bytes,
+  3 CC errors, 1 missing packet, and 2 out-of-order packets; high byte score
+  but damaged and not better visually.
+- AU 257-347: repeated clean full still frames matching AU 105.
+- AU 407-497, 557-627, 642-652, 708-758, 776-786, 836-846, and AU 869:
+  repeated clean full still frames matching AU 105.
+- AU 826: IDR, score 13301, confidence 0.895, 59 packets, 10379 slice bytes,
+  1 CC error; highest raw feature score but visually decoded as a gray/blank
+  frame, so it must not replace the readable held frame.
+
+Frames available:
+
+- `temp/live/best.png`: live-selected readable frame.
+- `captures/on4vvv_2026-06-14_173048_best.png`: preserved live-selected
+  readable frame.
+- `captures/on4vvv_2026-06-14_173335_candidate_au105.png`: preserved clean
+  full readable direct candidate.
+- `/tmp/tsscatterfix_on4vvv_analysis/voted_01_bucket_44_rolling-au105_rolling-au125_rolling-au129_rolling-au257_rolling-au267_rolling-au277_rolling-au287_rolling-au297_rolling-.png`:
+  voted frame from the 44-member repeated clean still group; visually matches
+  the direct readable frame.
+- `/tmp/tsscatterfix_on4vvv_analysis/candidate_01_rolling_au_826.png`:
+  highest raw score but visually blank/gray.
+
+Recovered image observation:
+
+- The recovered frame visibly contains `ON4VVV`.
+- The large received number is `6045`.
+- The locator line is `JO10WX`.
+- The frequency text is `51.7`.
+- The frame is full, clean, and suitable as QSO evidence.
+
+Optimization notes:
+
+- Codec auto-detection correctly selected H.264 from PMT stream type `0x1b`
+  and H.264 NAL evidence.
+- The ML/image-quality live analyzer selected AU 297 from the clean repeated
+  still group; this was a better operational choice than the highest raw
+  score candidate.
+- Raw feature score alone is unsafe here: AU 826 scored highest because it had
+  more slice bytes, but visual inspection shows a blank/gray decode. Candidate
+  ranking should keep penalizing blank or low-detail decoded images even when
+  packet and byte metrics look strong.
+- Fragment voting did not need to repair the best frame; it confirmed the
+  repeated 44-frame still pattern and matched the direct clean candidate.
+- The stream contained many overall continuity gaps, invalid headers, and
+  repeated payloads, but the useful still card repeated often enough that clean
+  keyframes were recovered throughout the capture.
+
+Conclusion:
+
+- This latest TS detection is valid ON4VVV QSO evidence.
+- Best readable content: `ON4VVV`, report/number `6045`, locator `JO10WX`,
+  frequency `51.7`.
+- The main recovery lesson is to prefer stable repeated clean still frames over
+  later high-byte-score blank decodes.
+
 ## 2026-06-14 - ON1AFB / latest TS detection
 
 - Counterstation: ON1AFB
