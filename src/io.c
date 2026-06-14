@@ -10,6 +10,7 @@
 #define sleep_us(us) Sleep((DWORD)(((us) + 999u) / 1000u))
 #else
 #include <netdb.h>
+#include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
 #define INVALID_SOCKET (-1)
@@ -87,6 +88,11 @@ int ts_input_init_udp(TsInput *input, const char *port) {
     return ok;
 }
 
+void ts_input_set_poll_callback(TsInput *input, TsInputPollCallback callback, void *userdata) {
+    input->poll_callback = callback;
+    input->poll_userdata = userdata;
+}
+
 size_t ts_input_read(TsInput *input, uint8_t *buf, size_t len) {
     if (input->kind == TS_IO_FILE) {
         return fread(buf, 1, len, input->file);
@@ -103,9 +109,36 @@ size_t ts_input_read(TsInput *input, uint8_t *buf, size_t len) {
             continue;
         }
 
+#ifndef _WIN32
+        while (1) {
+            fd_set fds;
+            struct timeval tv;
+            FD_ZERO(&fds);
+            FD_SET(input->sock, &fds);
+            tv.tv_sec = 0;
+            tv.tv_usec = 100000;
+
+            int ready = select(input->sock + 1, &fds, NULL, NULL, &tv);
+            if (ready > 0) {
+                break;
+            }
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return out;
+            }
+            if (input->poll_callback) {
+                input->poll_callback(input->poll_userdata);
+            }
+        }
+#endif
         int got = recv(input->sock, (char *)input->udp_buf, sizeof(input->udp_buf), 0);
         if (got <= 0) {
             return out;
+        }
+        if (input->poll_callback) {
+            input->poll_callback(input->poll_userdata);
         }
         input->udp_pos = 0;
         input->udp_len = (size_t)got;

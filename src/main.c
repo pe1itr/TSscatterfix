@@ -74,6 +74,22 @@ typedef struct {
 #endif
 } ResetKeyControl;
 
+typedef struct {
+    const Options *opt;
+    ResetKeyControl *reset_key;
+    PsiContext *psi;
+    ContinuityContext *continuity;
+    ContestContext *contest;
+    MlModel *ml;
+    RepairContext *repair;
+    uint8_t *clean_cc_valid;
+    uint8_t *clean_next_cc;
+    uint8_t *clean_video_cc_valid;
+    uint8_t *clean_video_next_cc;
+    TimestampRepairState *clean_ts_time;
+    const Stats *stats;
+} ResetControlContext;
+
 static void usage(FILE *f) {
     fprintf(f,
             "Usage: tsscatterfix [options]\n"
@@ -342,6 +358,18 @@ static void reset_stream_state(const Options *opt, PsiContext *psi, ContinuityCo
     memset(clean_video_cc_valid, 0, TS_PID_COUNT);
     memset(clean_video_next_cc, 0, TS_PID_COUNT);
     memset(clean_ts_time, 0, sizeof(*clean_ts_time));
+}
+
+static void handle_reset_key(void *userdata) {
+    ResetControlContext *ctx = (ResetControlContext *)userdata;
+    if (!ctx || !reset_key_pressed(ctx->reset_key)) {
+        return;
+    }
+    reset_stream_state(ctx->opt, ctx->psi, ctx->continuity, ctx->contest, ctx->ml, ctx->repair,
+                       ctx->clean_cc_valid, ctx->clean_next_cc, ctx->clean_video_cc_valid,
+                       ctx->clean_video_next_cc, ctx->clean_ts_time);
+    fprintf(stderr, "\033[96m[control] action=reset_stream_state key=R packet=%llu\033[0m\n",
+            (unsigned long long)ctx->stats->packets_read);
 }
 
 static int clean_ts_pid_allowed(const PsiContext *psi, uint16_t pid, int drop_audio) {
@@ -693,6 +721,7 @@ int main(int argc, char **argv) {
     uint8_t clean_video_next_cc[TS_PID_COUNT] = {0};
     TimestampRepairState clean_ts_time = {0, 0, 0, 0};
     ResetKeyControl reset_key;
+    ResetControlContext reset_control;
     uint64_t stats_index = 0;
 
     stats_init(&stats);
@@ -710,6 +739,20 @@ int main(int argc, char **argv) {
     repair_init(&repair, opt.psi_interval_ms, opt.verbose, opt.dry_run);
     ts_reader_init(&reader, &input, opt.verbose);
     reset_key_open(&reset_key, opt.verbose);
+    reset_control.opt = &opt;
+    reset_control.reset_key = &reset_key;
+    reset_control.psi = &psi;
+    reset_control.continuity = &continuity;
+    reset_control.contest = &contest;
+    reset_control.ml = &ml;
+    reset_control.repair = &repair;
+    reset_control.clean_cc_valid = clean_cc_valid;
+    reset_control.clean_next_cc = clean_next_cc;
+    reset_control.clean_video_cc_valid = clean_video_cc_valid;
+    reset_control.clean_video_next_cc = clean_video_next_cc;
+    reset_control.clean_ts_time = &clean_ts_time;
+    reset_control.stats = &stats;
+    ts_input_set_poll_callback(&input, handle_reset_key, &reset_control);
 
     while (1) {
         if (!ts_reader_next(&reader, raw, &stats)) {
@@ -726,13 +769,7 @@ int main(int argc, char **argv) {
             }
             break;
         }
-        if (reset_key_pressed(&reset_key)) {
-            reset_stream_state(&opt, &psi, &continuity, &contest, &ml, &repair,
-                               clean_cc_valid, clean_next_cc, clean_video_cc_valid,
-                               clean_video_next_cc, &clean_ts_time);
-            fprintf(stderr, "\033[96m[control] action=reset_stream_state key=R packet=%llu\033[0m\n",
-                    (unsigned long long)stats.packets_read);
-        }
+        handle_reset_key(&reset_control);
         TsPacket pkt;
         if (!ts_packet_parse(raw, &pkt)) {
             stats.invalid_packets++;

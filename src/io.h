@@ -27,10 +27,14 @@ typedef enum {
     TS_IO_UDP
 } TsIoKind;
 
+typedef void (*TsInputPollCallback)(void *userdata);
+
 typedef struct {
     TsIoKind kind;
     FILE *file;
     TsSocket sock;
+    TsInputPollCallback poll_callback;
+    void *poll_userdata;
     uint8_t udp_buf[65536];
     size_t udp_pos;
     size_t udp_len;
@@ -52,6 +56,7 @@ void ts_io_cleanup(void);
 
 void ts_input_init_file(TsInput *input, FILE *file);
 int ts_input_init_udp(TsInput *input, const char *port);
+void ts_input_set_poll_callback(TsInput *input, TsInputPollCallback callback, void *userdata);
 size_t ts_input_read(TsInput *input, uint8_t *buf, size_t len);
 void ts_input_close(TsInput *input);
 

@@ -9,9 +9,12 @@ ffmpeg from memory when UDP output is enabled.
 from __future__ import annotations
 
 import argparse
+import os
+import select
 import shutil
 import subprocess
 import sys
+import termios
 import threading
 import time
 from pathlib import Path
@@ -22,6 +25,7 @@ from PIL import ImageStat
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_DIR = SCRIPT_DIR.parent
 YELLOW = "\033[38;5;226m"
+BRIGHT_CYAN = "\033[96m"
 RESET = "\033[0m"
 
 
@@ -43,6 +47,73 @@ class SharedFrame:
     def get(self) -> tuple[bytes, int]:
         with self._lock:
             return self._frame, self._version
+
+    def clear(self) -> int:
+        with self._lock:
+            self._frame = Image.new("RGB", (self.width, self.height), (0, 0, 0)).tobytes()
+            self._version += 1
+            return self._version
+
+
+class ResetKeyReader:
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._stop = threading.Event()
+        self._fd: int | None = None
+        self._saved_attrs: list[object] | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> bool:
+        try:
+            self._fd = os.open("/dev/tty", os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            return False
+        try:
+            self._saved_attrs = termios.tcgetattr(self._fd)
+            attrs = termios.tcgetattr(self._fd)
+            attrs[3] &= ~(termios.ICANON | termios.ECHO)
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
+        except termios.error:
+            os.close(self._fd)
+            self._fd = None
+            return False
+        self._thread = threading.Thread(target=self._run, name="live-reset-key", daemon=True)
+        self._thread.start()
+        return True
+
+    def _run(self) -> None:
+        assert self._fd is not None
+        while not self._stop.is_set():
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 0.1)
+                if not ready:
+                    continue
+                data = os.read(self._fd, 64)
+            except OSError:
+                break
+            if b"r" in data or b"R" in data:
+                self._event.set()
+
+    def pressed(self) -> bool:
+        if not self._event.is_set():
+            return False
+        self._event.clear()
+        return True
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=0.5)
+        if self._fd is not None:
+            if self._saved_attrs is not None:
+                try:
+                    termios.tcsetattr(self._fd, termios.TCSANOW, self._saved_attrs)
+                except termios.error:
+                    pass
+            os.close(self._fd)
+            self._fd = None
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -382,6 +453,12 @@ def color_service_line(line: str, service_text: str) -> str:
     return line
 
 
+def color_reset_line(line: str) -> str:
+    if sys.stderr.isatty():
+        return f"{BRIGHT_CYAN}{line}{RESET}"
+    return line
+
+
 def image_quality(path: Path) -> float:
     if path.stat().st_size < 1024:
         return 0.0
@@ -621,16 +698,43 @@ def main() -> int:
     stop_event = threading.Event()
     udp_proc = None
     udp_thread = None
+    reset_keys = ResetKeyReader()
+    reset_key_enabled = reset_keys.start()
     if args.udp_output:
         udp_proc, udp_thread = start_udp_output(shared_frame, args.udp_output, args.output_fps, args.output_size, stop_event)
 
     print(f"[live] work_dir={args.work_dir} capture={capture} best=in_memory", file=sys.stderr)
+    if reset_key_enabled:
+        print("[live] reset_key=R source=/dev/tty", file=sys.stderr)
+    else:
+        print("[live] reset_key=disabled reason=no_tty", file=sys.stderr)
     try:
         with capture.open("ab", buffering=0) as out:
             while True:
                 chunk = sys.stdin.buffer.read(args.chunk_size)
                 if not chunk:
                     break
+                if reset_keys.pressed():
+                    out.seek(0)
+                    out.truncate(0)
+                    out.flush()
+                    analysis_dir = args.work_dir / "analysis"
+                    if analysis_dir.exists():
+                        shutil.rmtree(analysis_dir)
+                    best_png = args.work_dir / "best.png"
+                    if best_png.exists():
+                        best_png.unlink()
+                    best_score = None
+                    last_analysis = 0.0
+                    last_analysis_packets = 0
+                    last_service_text = ""
+                    first_input_at = time.monotonic()
+                    version = shared_frame.clear()
+                    reset_line = (
+                        f"[live] action=reset key=R{timing_text(started_at, first_input_at)} "
+                        f"packets=0 frame_version={version}"
+                    )
+                    print(color_reset_line(reset_line), file=sys.stderr)
                 if first_input_at is None:
                     first_input_at = time.monotonic()
                     print(f"[live] first_input t={first_input_at - started_at:.1f}s bytes={len(chunk)}", file=sys.stderr)
@@ -679,6 +783,7 @@ def main() -> int:
             )
         print("[live] input_eof", file=sys.stderr)
     finally:
+        reset_keys.close()
         stop_event.set()
         if udp_thread:
             udp_thread.join(timeout=2.0)
