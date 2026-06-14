@@ -4,6 +4,128 @@ Operational notes for weak-signal DATV/TSscatterfix contacts. New connection
 entries should follow `CONNECTION_ANALYSIS_WORKFLOW.md` so each QSO also
 captures software optimization evidence.
 
+## 2026-06-14 - ON4VVV / latest 70cm TS detection
+
+- Counterstation: ON4VVV
+- Logged: 2026-06-14 18:17 CEST
+- Latest detection artifacts: `temp/live/`
+- Capture analyzed: `temp/live/rolling.ts`
+- Preserved capture analyzed: `captures/on4vvv_2026-06-14_181433_70cm_rolling.ts`
+- Best recovered frame: `captures/on4vvv_2026-06-14_181432_70cm_best.png`
+- Selected keyframe candidate: `captures/on4vvv_2026-06-14_181433_70cm_candidate_au004.h264`
+- Selected keyframe image: `captures/on4vvv_2026-06-14_181433_70cm_candidate_au004.png`
+- Live analysis log: `temp/live/live.log`
+- Operating note: current ON4VVV contact requested as 70cm; recovered frame
+  shows `70` with the right side of the band text visibly corrupted.
+
+### TS Detection
+
+Analysis checked on 2026-06-14 18:14-18:17 CEST with:
+
+```bash
+./tsscatterfix --input temp/live/rolling.ts --dry-run --verbose --json-status --stats-interval 50 --mode contest
+tools/contest_fragment_vote.py --input temp/live/rolling.ts --output-dir /tmp/tsscatterfix_on4vvv_70cm_analysis --codec auto --decode --features-csv /tmp/tsscatterfix_on4vvv_70cm_analysis/features.csv --max-candidates 8 --vote
+tools/contest_probe.py --input temp/live/rolling.ts
+```
+
+Detected transport/service structure:
+
+- TS packets read: 217
+- PAT detected: yes
+- PMT detected: yes, PMT PID `0x00ff`
+- SDT detected: yes
+- SDT provider: `Portsdown 4`
+- SDT service name: `ON4VVV`
+- PCR PID: `0x0100`
+- Video PID: `0x0100`
+- Audio PID: `0x0101`
+- PMT stream types: H.264/AVC video `0x1b` on PID `0x0100`, AAC audio
+  `0x0f` on PID `0x0101`
+- Codec selected by fragment analysis: H.264/AVC
+
+Signal/packet quality evidence:
+
+- Invalid TS headers: 5
+- TEI packets: 6 in the main parser; H.264 probe saw 0 TEI packets on the
+  selected video PID
+- Continuity errors: 11 overall
+- Missing packets by continuity counter: 49 overall
+- Duplicates/out-of-order: 0/0 overall
+- Contest fragments seen/stored: 209/209
+- Video fragments classified by contest mode: 141
+- PSI fragments classified by contest mode: 18
+- Repeated packet candidates: 64
+- Repeated payload candidates: 88
+- H.264 probe saw 171 video PID packets, 14 PES starts, 5 video continuity
+  errors, 26 video missing-by-CC, 0 video duplicates, and 0 video out-of-order
+  packets.
+
+Codec/keyframe evidence:
+
+- Access units from fragment analysis: 15
+- IDR/key units: 2
+- SPS present: yes
+- PPS present: yes
+- Decode trigger reached: yes, `SPS + PPS + IDR`
+- NAL evidence from probe: 12 non-IDR slices, 2 IDR slices, 14 SEI units,
+  2 SPS units, and 2 PPS units.
+- No voting group was available; the capture had only two IDRs and no pair of
+  similarly sized IDR slices.
+
+Frame progression:
+
+- AU 0-3: non-IDR startup fragments; no standalone still recovery expected.
+- AU 4: IDR, score 17618, confidence 0.893, 83 packets, 14634 slice bytes,
+  1 CC error, 6 missing packets, 0 out-of-order packets; decode ok and is the
+  only useful readable frame.
+- AU 5-13: small non-IDR delta frames with 2 packets each; no standalone still
+  recovery expected.
+- AU 14: IDR, score 4765, confidence 0.905, 21 packets, 3677 slice bytes,
+  clean packet metrics; decode ok but visually gray/blank.
+
+Frames available:
+
+- `temp/live/best.png`: live-selected readable frame from AU 4.
+- `captures/on4vvv_2026-06-14_181432_70cm_best.png`: preserved live-selected
+  readable frame.
+- `captures/on4vvv_2026-06-14_181433_70cm_candidate_au004.png`: preserved
+  readable direct candidate.
+- `/tmp/tsscatterfix_on4vvv_70cm_analysis/candidate_02_rolling_au_014.png`:
+  clean packet metrics but visually blank/gray.
+
+Recovered image observation:
+
+- The recovered frame visibly contains `ON4VVV`.
+- The large received number is `0745`.
+- The locator line is `JO10WX`.
+- The band text shows `70` and is partly corrupted at the right edge; it is
+  consistent with the requested 70cm QSO but not fully clean in that field.
+- The frame is mostly full and readable, with localized corruption in the
+  lower-right text area.
+
+Optimization notes:
+
+- Codec auto-detection again correctly selected H.264 from PMT stream type
+  `0x1b` and H.264 NAL evidence.
+- This is a very short burst capture: only 217 TS packets and 15 access-units.
+  The live analyzer correctly held AU 4 because it was the only readable still.
+- AU 14 demonstrates that clean candidate packet metrics are not sufficient:
+  it had zero candidate CC/missing/out-of-order errors but decoded to a blank
+  gray frame because too little useful slice data was present.
+- Fragment voting could not help this capture; there were not enough similar
+  IDR repeats. Recovery depended on preserving the single useful early IDR.
+- The band text corruption is localized. Ranking should avoid rejecting the
+  frame as a whole when the callsign, number, and locator are strong.
+
+Conclusion:
+
+- This latest TS detection is valid ON4VVV QSO evidence for the requested 70cm
+  contact.
+- Best readable content: `ON4VVV`, report/number `0745`, locator `JO10WX`,
+  band text partially readable as `70...`.
+- The main recovery lesson is to keep a single readable early IDR when no
+  repeated still frames or voting groups are available.
+
 ## 2026-06-14 - ON4VVV / latest TS detection
 
 - Counterstation: ON4VVV
