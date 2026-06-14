@@ -13,6 +13,10 @@ prototypes. Those tools can extract H.264/H.265 keyframe candidates from repeate
 weak fragments, decode them with ffmpeg, keep the best still frame, and optionally
 publish that recovered still as a low-rate MPEG-TS UDP stream.
 
+This live still-frame path has already been used to complete multiple weak-signal
+DATV contest contacts where ordinary playback did not hold long enough for a
+stable picture.
+
 ## What It Repairs
 
 TSscatterfix is strongest at repeated transport metadata and packet structure:

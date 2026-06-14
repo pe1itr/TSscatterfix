@@ -1,3 +1,9 @@
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200112L
+#endif
+#endif
+
 #include "continuity.h"
 #include "contest.h"
 #include "io.h"
@@ -15,7 +21,9 @@
 #include <io.h>
 #include <sys/stat.h>
 #else
+#include <sys/select.h>
 #include <sys/stat.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -56,6 +64,16 @@ typedef struct {
     uint64_t next_pcr;
 } TimestampRepairState;
 
+typedef struct {
+    int enabled;
+#ifndef _WIN32
+    FILE *tty;
+    int fd;
+    struct termios saved_termios;
+    int restore_termios;
+#endif
+} ResetKeyControl;
+
 static void usage(FILE *f) {
     fprintf(f,
             "Usage: tsscatterfix [options]\n"
@@ -86,6 +104,7 @@ static void usage(FILE *f) {
             "  --dry-run               Analyze but do not write TS output\n"
             "  --no-ml                 Disable probabilistic role inference\n"
             "  --ml-state PATH         Load/save minimal ML state\n"
+            "  R key                   Reset learned stream state when run from a terminal\n"
             "  --help                  Show this help\n");
 }
 
@@ -216,6 +235,113 @@ static int pid_in_list(uint16_t pid, const uint16_t *pids, size_t count) {
         }
     }
     return 0;
+}
+
+static int reset_key_open(ResetKeyControl *key, int verbose) {
+    memset(key, 0, sizeof(*key));
+#ifdef _WIN32
+    (void)verbose;
+    return 0;
+#else
+    key->fd = -1;
+    key->tty = fopen("/dev/tty", "r");
+    if (!key->tty) {
+        return 0;
+    }
+    key->fd = fileno(key->tty);
+    if (key->fd < 0 || tcgetattr(key->fd, &key->saved_termios) != 0) {
+        fclose(key->tty);
+        key->tty = NULL;
+        key->fd = -1;
+        return 0;
+    }
+
+    struct termios raw = key->saved_termios;
+    raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(key->fd, TCSANOW, &raw) != 0) {
+        fclose(key->tty);
+        key->tty = NULL;
+        key->fd = -1;
+        return 0;
+    }
+    key->restore_termios = 1;
+    key->enabled = 1;
+    if (verbose) {
+        fprintf(stderr, "[control] reset_key=R source=/dev/tty\n");
+    }
+    return 1;
+#endif
+}
+
+static void reset_key_close(ResetKeyControl *key) {
+#ifdef _WIN32
+    (void)key;
+#else
+    if (key->restore_termios && key->fd >= 0) {
+        tcsetattr(key->fd, TCSANOW, &key->saved_termios);
+    }
+    if (key->tty) {
+        fclose(key->tty);
+    }
+    memset(key, 0, sizeof(*key));
+    key->fd = -1;
+#endif
+}
+
+static int reset_key_pressed(ResetKeyControl *key) {
+#ifdef _WIN32
+    (void)key;
+    return 0;
+#else
+    if (!key->enabled || key->fd < 0) {
+        return 0;
+    }
+
+    int pressed = 0;
+    while (1) {
+        fd_set fds;
+        struct timeval tv;
+        FD_ZERO(&fds);
+        FD_SET(key->fd, &fds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 0;
+        int ready = select(key->fd + 1, &fds, NULL, NULL, &tv);
+        if (ready <= 0) {
+            break;
+        }
+
+        char ch;
+        ssize_t got = read(key->fd, &ch, 1);
+        if (got <= 0) {
+            break;
+        }
+        if (ch == 'r' || ch == 'R') {
+            pressed = 1;
+        }
+    }
+    return pressed;
+#endif
+}
+
+static void reset_stream_state(const Options *opt, PsiContext *psi, ContinuityContext *continuity,
+                               ContestContext *contest, MlModel *ml, RepairContext *repair,
+                               uint8_t clean_cc_valid[TS_PID_COUNT],
+                               uint8_t clean_next_cc[TS_PID_COUNT],
+                               uint8_t clean_video_cc_valid[TS_PID_COUNT],
+                               uint8_t clean_video_next_cc[TS_PID_COUNT],
+                               TimestampRepairState *clean_ts_time) {
+    psi_init(psi);
+    continuity_init(continuity);
+    contest_init(contest);
+    ml_model_init(ml, opt->ml_enabled, opt->contest_mode, opt->ml_state_path);
+    repair_init(repair, opt->psi_interval_ms, opt->verbose, opt->dry_run);
+    memset(clean_cc_valid, 0, TS_PID_COUNT);
+    memset(clean_next_cc, 0, TS_PID_COUNT);
+    memset(clean_video_cc_valid, 0, TS_PID_COUNT);
+    memset(clean_video_next_cc, 0, TS_PID_COUNT);
+    memset(clean_ts_time, 0, sizeof(*clean_ts_time));
 }
 
 static int clean_ts_pid_allowed(const PsiContext *psi, uint16_t pid, int drop_audio) {
@@ -566,6 +692,7 @@ int main(int argc, char **argv) {
     uint8_t clean_video_cc_valid[TS_PID_COUNT] = {0};
     uint8_t clean_video_next_cc[TS_PID_COUNT] = {0};
     TimestampRepairState clean_ts_time = {0, 0, 0, 0};
+    ResetKeyControl reset_key;
     uint64_t stats_index = 0;
 
     stats_init(&stats);
@@ -582,6 +709,7 @@ int main(int argc, char **argv) {
     }
     repair_init(&repair, opt.psi_interval_ms, opt.verbose, opt.dry_run);
     ts_reader_init(&reader, &input, opt.verbose);
+    reset_key_open(&reset_key, opt.verbose);
 
     while (1) {
         if (!ts_reader_next(&reader, raw, &stats)) {
@@ -597,6 +725,13 @@ int main(int argc, char **argv) {
                 continue;
             }
             break;
+        }
+        if (reset_key_pressed(&reset_key)) {
+            reset_stream_state(&opt, &psi, &continuity, &contest, &ml, &repair,
+                               clean_cc_valid, clean_next_cc, clean_video_cc_valid,
+                               clean_video_next_cc, &clean_ts_time);
+            fprintf(stderr, "\033[96m[control] action=reset_stream_state key=R packet=%llu\033[0m\n",
+                    (unsigned long long)stats.packets_read);
         }
         TsPacket pkt;
         if (!ts_packet_parse(raw, &pkt)) {
@@ -727,6 +862,7 @@ int main(int argc, char **argv) {
     if (!ts_output_flush(&output)) {
         fprintf(stderr, "tsscatterfix: output flush failed\n");
     }
+    reset_key_close(&reset_key);
     ts_output_close(&output);
     ts_input_close(&input);
     if (json_status_file && json_status_file != stderr) fclose(json_status_file);
