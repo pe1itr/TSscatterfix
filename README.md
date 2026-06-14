@@ -168,6 +168,18 @@ codec=h264 ... key_units=1 sps=yes pps=yes
 Until that happens, the tools may have video PID packets and access units, but no
 decoder start point.
 
+The contest decode trigger is intentionally simple and early:
+
+```text
+H.264: SPS + PPS + IDR
+H.265: VPS + SPS + PPS + IDR/CRA
+```
+
+As soon as that minimum is present, `contest_fragment_vote.py --decode` writes a
+candidate elementary stream and lets ffmpeg try to decode one still frame. The
+live helper uses the same rule and, before the first recovered image is found,
+checks again on each new packet batch by default.
+
 ## Fragment Candidate Tool
 
 `tools/contest_fragment_vote.py` extracts H.264/H.265 keyframe candidates from

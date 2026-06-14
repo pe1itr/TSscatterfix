@@ -131,6 +131,14 @@ class AccessUnit:
         )
 
 
+def has_required_headers(codec: str, headers: dict[int, bytes]) -> bool:
+    return all(headers.get(header_type) for header_type in CODECS[codec].header_types)
+
+
+def minimum_decode_ready(codec: str, access_units: list[AccessUnit], headers: dict[int, bytes]) -> bool:
+    return has_required_headers(codec, headers) and any(au.has_idr for au in access_units)
+
+
 def ml_feature_value(au: AccessUnit, name: str) -> float:
     if name == "packet_confidence":
         return au.packet_confidence
@@ -484,7 +492,18 @@ def read_access_units(path: Path, video_pid_arg: int | None, codec_arg: str) -> 
 
 def write_candidates(access_units: list[AccessUnit], headers: dict[int, bytes], out_dir: Path, max_candidates: int, model: dict | None) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    codec = access_units[0].codec if access_units else None
+    if codec is None:
+        print("[fragment] decode_ready=no reason=no_access_units")
+        return []
+    if not has_required_headers(codec, headers):
+        print(f"[fragment] decode_ready=no codec={codec} reason=missing_headers {header_status(codec, headers)}")
+        return []
     idr_units = sorted((au for au in access_units if au.has_idr), key=lambda au: ml_score(au, model), reverse=True)
+    if not idr_units:
+        print(f"[fragment] decode_ready=no codec={codec} reason=no_keyframe {header_status(codec, headers)}")
+        return []
+    print(f"[fragment] decode_ready=yes codec={codec} rule=minimum_headers_plus_keyframe {header_status(codec, headers)} key_units={len(idr_units)}")
     paths: list[Path] = []
     for rank, au in enumerate(idr_units[:max_candidates], 1):
         spec = CODECS[au.codec]
@@ -520,6 +539,9 @@ def au_quality(au: AccessUnit, model: dict | None) -> int:
 
 def write_voted_candidates(access_units: list[AccessUnit], headers: dict[int, bytes], out_dir: Path, model: dict | None) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
+    codec = access_units[0].codec if access_units else None
+    if codec is None or not has_required_headers(codec, headers):
+        return []
     idr_units = [au for au in access_units if au.has_idr and idr_data(au)]
     groups: dict[tuple[str, int], list[AccessUnit]] = defaultdict(list)
     for au in idr_units:
@@ -679,9 +701,10 @@ def main() -> int:
             if len(data) > len(best_headers.get(nal_type, b"")):
                 best_headers[nal_type] = data
         idr_count = sum(1 for au in access_units if au.has_idr)
+        ready = minimum_decode_ready(codec, access_units, headers)
         print(
             f"[fragment] input={input_path} codec={codec} video_pid=0x{video_pid:04x} access_units={len(access_units)} "
-            f"idr_units={idr_count} key_units={idr_count} {header_status(codec, headers)}"
+            f"idr_units={idr_count} key_units={idr_count} decode_ready={'yes' if ready else 'no'} {header_status(codec, headers)}"
         )
 
     idr_count = sum(1 for au in all_access_units if au.has_idr)
@@ -689,9 +712,15 @@ def main() -> int:
     codec_text = ",".join(sorted(codecs))
     primary_codec = sorted(codecs)[0] if codecs else "h264"
     primary_headers = best_headers_by_codec[primary_codec]
+    ready_codecs = [
+        codec
+        for codec in sorted(codecs)
+        if minimum_decode_ready(codec, [au for au in all_access_units if au.codec == codec], best_headers_by_codec[codec])
+    ]
     print(
         f"[fragment] combined codecs={codec_text} video_pids={video_pid_text} access_units={len(all_access_units)} "
-        f"idr_units={idr_count} key_units={idr_count} {header_status(primary_codec, primary_headers)}"
+        f"idr_units={idr_count} key_units={idr_count} decode_ready={'yes' if ready_codecs else 'no'} "
+        f"ready_codecs={','.join(ready_codecs) if ready_codecs else 'none'} {header_status(primary_codec, primary_headers)}"
     )
     candidate_headers = best_headers_by_codec
     candidates: list[Path] = []

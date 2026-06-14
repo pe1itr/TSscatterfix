@@ -101,6 +101,8 @@ def summarize_analysis_log(log: str) -> str:
     features_rows = None
     ffmpeg_missing = False
     vote_no_groups = False
+    decode_ready = None
+    decode_ready_reason = ""
     codec_warnings: list[str] = []
     error = ""
     low_quality = ""
@@ -124,6 +126,13 @@ def summarize_analysis_log(log: str) -> str:
                     pps = part.split("=", 1)[1]
         elif line.startswith("[fragment] candidate="):
             candidates += 1
+        elif line.startswith("[fragment] decode_ready="):
+            parts = line.split()
+            for part in parts:
+                if part.startswith("decode_ready="):
+                    decode_ready = part.split("=", 1)[1]
+                elif part.startswith("reason="):
+                    decode_ready_reason = part.split("=", 1)[1]
         elif line.startswith("[fragment] codec_warning "):
             codec_warnings.append(line.split(" ", 2)[2])
         elif line.startswith("[vote] candidate="):
@@ -153,17 +162,27 @@ def summarize_analysis_log(log: str) -> str:
         return " ".join(parts)
     if ffmpeg_missing:
         return "ffmpeg_missing"
+    if decode_ready == "no" and decode_ready_reason:
+        detail = decode_ready_reason
+    elif decode_ready == "no":
+        detail = "not_decode_ready"
+    elif decode_ready == "yes" and decode_ok == 0 and decode_failed == 0:
+        detail = "decode_ready_no_attempt"
+    elif decode_ready == "yes":
+        detail = "decode_ready"
+    else:
+        detail = ""
     if access_units == "0":
         return "no_access_units"
-    if (key_units or idr_units) == "0":
+    if not detail and (key_units or idr_units) == "0":
         detail = "no_idr"
-    elif candidates == 0:
+    elif not detail and candidates == 0:
         detail = "no_candidates"
     elif decode_ok == 0 and decode_failed > 0:
         detail = "decode_failed"
     elif low_quality:
         detail = "low_image_quality"
-    else:
+    elif not detail:
         detail = "no_decoded_png"
 
     parts = [detail]
@@ -556,13 +575,13 @@ def main() -> int:
     parser.add_argument("--work-dir", default=Path("temp/live"), type=Path)
     parser.add_argument("--model", type=Path, help="Optional contest ML model JSON")
     parser.add_argument("--interval", type=float, default=5.0, help="Seconds between analyses")
-    parser.add_argument("--startup-interval", type=float, default=0.5,
+    parser.add_argument("--startup-interval", type=float, default=0.0,
                         help="Seconds between analyses until the first best image is found")
     parser.add_argument("--analysis-packets", type=int, default=500, help="Minimum new TS packets between analyses")
-    parser.add_argument("--startup-analysis-packets", type=int, default=50,
+    parser.add_argument("--startup-analysis-packets", type=int, default=1,
                         help="Minimum new TS packets between analyses until the first best image is found")
     parser.add_argument("--max-mb", type=float, default=8.0, help="Rolling capture size")
-    parser.add_argument("--min-packets", type=int, default=500, help="Minimum TS packets before first analysis")
+    parser.add_argument("--min-packets", type=int, default=1, help="Minimum TS packets before first analysis")
     parser.add_argument("--max-candidates", type=int, default=8)
     parser.add_argument("--video-pid", type=lambda s: int(s, 0),
                         help="Force the video PID, for example 0x0100")
