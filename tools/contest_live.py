@@ -604,6 +604,7 @@ def start_udp_output(shared_frame: SharedFrame, udp_output: str, fps: float, siz
         frame_interval = 1.0 / fps
         current_version = -1
         current, current_version = shared_frame.get()
+        next_frame_at = time.monotonic()
         while not stop_event.is_set():
             returncode = proc.poll()
             if returncode is not None:
@@ -623,7 +624,11 @@ def start_udp_output(shared_frame: SharedFrame, udp_output: str, fps: float, siz
                 returncode = proc.poll()
                 print(f"[live] udp_output_broken_pipe returncode={returncode}", file=sys.stderr)
                 break
-            time.sleep(frame_interval)
+            # Rawvideo timestamps advance by exactly one frame per write.
+            # Include pipe/encoding time in the schedule so the stream clock
+            # does not fall progressively behind real time, even on black.
+            next_frame_at += frame_interval
+            stop_event.wait(max(0.0, next_frame_at - time.monotonic()))
 
         if proc.stdin:
             try:
@@ -636,6 +641,11 @@ def start_udp_output(shared_frame: SharedFrame, udp_output: str, fps: float, siz
     thread = threading.Thread(target=output_loop, name="contest-udp-output", daemon=True)
     thread.start()
     print(f"[live] udp_output={udp_output} fps={fps:g} size={width}x{height}", file=sys.stderr)
+    print(
+        f"[player] Run on the receiving machine: cvlc 'udp://@:{udp_output.rsplit(':', 1)[-1]}' "
+        "--demux=ts --network-caching=1000 --avcodec-hw=none",
+        file=sys.stderr,
+    )
     return proc, thread
 
 

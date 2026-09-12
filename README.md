@@ -280,8 +280,11 @@ ffplay -fflags nobuffer -flags low_delay -f mpegts udp://@:1235
 or:
 
 ```bash
-vlc 'udp://@:1235' --demux=ts --network-caching=300 --avcodec-hw=none
+cvlc 'udp://@:1235' --demux=ts --network-caching=300 --avcodec-hw=none
 ```
+
+When using `--udp-output`, tsscatterfix prints this command at startup with the
+configured destination port. Run it on the receiving machine.
 
 Live service metadata is logged when PAT/PMT/SDT are seen:
 

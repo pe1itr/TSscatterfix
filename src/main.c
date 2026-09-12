@@ -675,6 +675,9 @@ int main(int argc, char **argv) {
         if (opt.verbose) {
             fprintf(stderr, "[io] udp_output target=%s\n", opt.udp_output_host_port);
         }
+        fprintf(stderr,
+                "[player] Run on the receiving machine: cvlc 'udp://@:%s' --demux=ts --network-caching=300 --avcodec-hw=none\n",
+                strrchr(opt.udp_output_host_port, ':') + 1);
     }
     if (opt.json_status_path) {
         json_status_file = fopen(opt.json_status_path, "w");
