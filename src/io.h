@@ -24,7 +24,8 @@ typedef int TsSocket;
 
 typedef enum {
     TS_IO_FILE = 0,
-    TS_IO_UDP
+    TS_IO_UDP,
+    TS_IO_CALLBACK
 } TsIoKind;
 
 typedef void (*TsInputPollCallback)(void *userdata);
@@ -45,6 +46,8 @@ typedef struct {
     FILE *file;
     TsSocket sock;
     struct sockaddr_storage addr;
+    int (*write_callback)(void *, const uint8_t *, size_t);
+    void *write_userdata;
     socklen_t addr_len;
     uint8_t udp_out_buf[TS_PACKET_SIZE * 7];
     size_t udp_out_packets;
@@ -61,6 +64,8 @@ size_t ts_input_read(TsInput *input, uint8_t *buf, size_t len);
 void ts_input_close(TsInput *input);
 
 void ts_output_init_file(TsOutput *output, FILE *file);
+void ts_output_init_callback(TsOutput *output,
+                             int (*write)(void *, const uint8_t *, size_t), void *userdata);
 int ts_output_init_udp(TsOutput *output, const char *host_port);
 void ts_output_set_udp_rate(TsOutput *output, unsigned kbit_per_sec);
 int ts_output_write_packet(TsOutput *output, const uint8_t packet[TS_PACKET_SIZE]);

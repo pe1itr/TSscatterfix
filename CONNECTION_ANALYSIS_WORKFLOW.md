@@ -48,16 +48,16 @@ Important files to look for:
 
 ## Required Commands
 
-Run the TS parser in contest mode:
+Run the TS parser in normal mode for transport metadata and continuity statistics:
 
 ```bash
-./tsscatterfix --input PATH/rolling.ts --dry-run --verbose --json-status --stats-interval 50 --mode contest
+./tsscatterfix --input PATH/rolling.ts --dry-run --verbose --json-status --stats-interval 50 --mode normal
 ```
 
 Run fragment/keyframe analysis:
 
 ```bash
-tools/contest_fragment_vote.py \
+./scatterfix-contest recover \
   --input PATH/rolling.ts \
   --output-dir /tmp/tsscatterfix_connection_analysis \
   --codec auto \
@@ -71,7 +71,7 @@ If the codec or PID is ambiguous, rerun with explicit `--video-pid` or
 For H.264 captures, optionally run:
 
 ```bash
-tools/contest_probe.py --input PATH/rolling.ts
+./scatterfix-contest probe --input PATH/rolling.ts
 ```
 
 ## Required Evidence

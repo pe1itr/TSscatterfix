@@ -3,3 +3,11 @@ temp/
 tsscatterfix
 src/*.o
 src/*.d
+tools/*.o
+tools/*.d
+libscatterfix*.a
+scatterfix-contest
+scatterfix-model
+tests/test_scatterfix
+examples/embedded
+build/

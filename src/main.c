@@ -4,6 +4,8 @@
 #endif
 #endif
 
+#include "scatterfix.h"
+#include "../tools/contest_cli.h"
 #include "continuity.h"
 #include "contest.h"
 #include "io.h"
@@ -58,13 +60,6 @@ typedef struct {
 } Options;
 
 typedef struct {
-    uint8_t pts_valid;
-    uint8_t pcr_valid;
-    uint64_t next_pts;
-    uint64_t next_pcr;
-} TimestampRepairState;
-
-typedef struct {
     int enabled;
 #ifndef _WIN32
     FILE *tty;
@@ -75,19 +70,8 @@ typedef struct {
 } ResetKeyControl;
 
 typedef struct {
-    const Options *opt;
     ResetKeyControl *reset_key;
-    PsiContext *psi;
-    ContinuityContext *continuity;
-    ContestContext *contest;
-    MlModel *ml;
-    RepairContext *repair;
-    uint8_t *clean_cc_valid;
-    uint8_t *clean_next_cc;
-    uint8_t *clean_video_cc_valid;
-    uint8_t *clean_video_next_cc;
-    TimestampRepairState *clean_ts_time;
-    const Stats *stats;
+    Scatterfix *engine;
 } ResetControlContext;
 
 static void usage(FILE *f) {
@@ -234,25 +218,6 @@ static int parse_options(int argc, char **argv, Options *opt) {
     return 1;
 }
 
-static void make_null_packet(uint8_t raw[TS_PACKET_SIZE]) {
-    raw[0] = TS_SYNC_BYTE;
-    raw[1] = 0x1f;
-    raw[2] = 0xff;
-    raw[3] = 0x10;
-    for (size_t i = 4; i < TS_PACKET_SIZE; i++) {
-        raw[i] = 0xff;
-    }
-}
-
-static int pid_in_list(uint16_t pid, const uint16_t *pids, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        if (pids[i] == pid) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
 static int reset_key_open(ResetKeyControl *key, int verbose) {
     memset(key, 0, sizeof(*key));
 #ifdef _WIN32
@@ -341,263 +306,16 @@ static int reset_key_pressed(ResetKeyControl *key) {
 #endif
 }
 
-static void reset_stream_state(const Options *opt, PsiContext *psi, ContinuityContext *continuity,
-                               ContestContext *contest, MlModel *ml, RepairContext *repair,
-                               uint8_t clean_cc_valid[TS_PID_COUNT],
-                               uint8_t clean_next_cc[TS_PID_COUNT],
-                               uint8_t clean_video_cc_valid[TS_PID_COUNT],
-                               uint8_t clean_video_next_cc[TS_PID_COUNT],
-                               TimestampRepairState *clean_ts_time) {
-    psi_init(psi);
-    continuity_init(continuity);
-    contest_init(contest);
-    ml_model_init(ml, opt->ml_enabled, opt->contest_mode, opt->ml_state_path);
-    repair_init(repair, opt->psi_interval_ms, opt->verbose, opt->dry_run);
-    memset(clean_cc_valid, 0, TS_PID_COUNT);
-    memset(clean_next_cc, 0, TS_PID_COUNT);
-    memset(clean_video_cc_valid, 0, TS_PID_COUNT);
-    memset(clean_video_next_cc, 0, TS_PID_COUNT);
-    memset(clean_ts_time, 0, sizeof(*clean_ts_time));
-}
-
 static void handle_reset_key(void *userdata) {
-    ResetControlContext *ctx = (ResetControlContext *)userdata;
-    if (!ctx || !reset_key_pressed(ctx->reset_key)) {
-        return;
-    }
-    reset_stream_state(ctx->opt, ctx->psi, ctx->continuity, ctx->contest, ctx->ml, ctx->repair,
-                       ctx->clean_cc_valid, ctx->clean_next_cc, ctx->clean_video_cc_valid,
-                       ctx->clean_video_next_cc, ctx->clean_ts_time);
-    fprintf(stderr, "\033[96m[control] action=reset_stream_state key=R packet=%llu\033[0m\n",
-            (unsigned long long)ctx->stats->packets_read);
-}
-
-static int clean_ts_pid_allowed(const PsiContext *psi, uint16_t pid, int drop_audio) {
-    if (pid == TS_NULL_PID || pid == 0x0000) {
-        return 1;
-    }
-    if (!psi->has_pmt) {
-        return 1;
-    }
-    if (pid == psi->primary_pmt_pid || pid == psi->pcr_pid) {
-        return 1;
-    }
-    if (pid_in_list(pid, psi->video_pids, psi->video_count)) {
-        return 1;
-    }
-    if (!drop_audio && pid_in_list(pid, psi->audio_pids, psi->audio_count)) {
-        return 1;
-    }
-    return 0;
-}
-
-static int clean_ts_replace_bad_psi(const PsiContext *psi, TsPacket *pkt, uint8_t raw[TS_PACKET_SIZE],
-                                    Stats *stats, int verbose) {
-    const uint8_t *cached = NULL;
-    const char *kind = NULL;
-    uint8_t cc = pkt->continuity_counter;
-
-    if (!psi_pid_is_known_si(psi, pkt->pid) || psi_packet_has_valid_section(psi, pkt)) {
-        return 0;
-    }
-
-    if (pkt->pid == 0x0000 && psi->has_cached_pat) {
-        cached = psi->cached_pat;
-        kind = "PAT";
-    } else if (psi_pid_is_pmt(psi, pkt->pid) && psi->has_cached_pmt) {
-        cached = psi->cached_pmt;
-        kind = "PMT";
-    } else if (pkt->pid == 0x0011 && psi->has_cached_sdt) {
-        cached = psi->cached_sdt;
-        kind = "SDT";
-    }
-
-    if (cached) {
-        memcpy(raw, cached, TS_PACKET_SIZE);
-        raw[3] = (uint8_t)((raw[3] & 0xf0) | (cc & 0x0f));
-        stats->clean_ts_psi_cache_repairs++;
-        stats->repair_actions++;
-        if (verbose) {
-            fprintf(stderr,
-                    "[repair] action=replace_bad_psi_from_cache pid=0x%04x table=%s reason=bad_or_unparseable_section confidence=0.80\n",
-                    pkt->pid, kind);
-        }
-        return 1;
-    }
-
-    make_null_packet(raw);
-    stats->clean_ts_null_packets++;
-    stats->clean_ts_bad_psi_nulls++;
-    stats->repair_actions++;
-    if (verbose) {
-        fprintf(stderr,
-                "[repair] action=replace_with_null pid=0x%04x reason=bad_psi_without_cache confidence=0.70\n",
-                pkt->pid);
-    }
-    return 1;
-}
-
-static void clean_ts_rewrite_psi_cc(const PsiContext *psi, const TsPacket *pkt, uint8_t raw[TS_PACKET_SIZE],
-                                    uint8_t cc_valid[TS_PID_COUNT], uint8_t next_cc[TS_PID_COUNT],
-                                    int verbose) {
-    if (!psi_pid_is_known_si(psi, pkt->pid) || !pkt->has_payload) {
-        return;
-    }
-    if (!cc_valid[pkt->pid]) {
-        cc_valid[pkt->pid] = 1;
-        next_cc[pkt->pid] = 0;
-    }
-    uint8_t old_cc = (uint8_t)(raw[3] & 0x0f);
-    uint8_t cc = next_cc[pkt->pid];
-    raw[3] = (uint8_t)((raw[3] & 0xf0) | (cc & 0x0f));
-    next_cc[pkt->pid] = (uint8_t)((cc + 1u) & 0x0f);
-    if (verbose && old_cc != cc) {
-        fprintf(stderr,
-                "[repair] action=rewrite_psi_continuity pid=0x%04x old=%u new=%u reason=clean_ts_regenerated_psi confidence=0.85\n",
-                pkt->pid, old_cc, cc);
+    ResetControlContext *ctx = userdata;
+    if (ctx && reset_key_pressed(ctx->reset_key)) {
+        scatterfix_reset(ctx->engine);
+        fprintf(stderr, "[control] action=reset_stream_state key=R\n");
     }
 }
 
-static void clean_ts_rewrite_video_cc(const PsiContext *psi, const TsPacket *pkt, uint8_t raw[TS_PACKET_SIZE],
-                                      uint8_t cc_valid[TS_PID_COUNT], uint8_t next_cc[TS_PID_COUNT],
-                                      Stats *stats, int verbose) {
-    if (!pkt->has_payload || !pid_in_list(pkt->pid, psi->video_pids, psi->video_count)) {
-        return;
-    }
-    if (!cc_valid[pkt->pid]) {
-        cc_valid[pkt->pid] = 1;
-        next_cc[pkt->pid] = pkt->continuity_counter;
-    }
-    uint8_t old_cc = (uint8_t)(raw[3] & 0x0f);
-    uint8_t cc = next_cc[pkt->pid];
-    raw[3] = (uint8_t)((raw[3] & 0xf0) | (cc & 0x0f));
-    next_cc[pkt->pid] = (uint8_t)((cc + 1u) & 0x0f);
-    if (old_cc != cc) {
-        stats->clean_ts_media_cc_rewrites++;
-        stats->repair_actions++;
-        if (verbose) {
-            fprintf(stderr,
-                    "[repair] action=rewrite_video_continuity pid=0x%04x old=%u new=%u reason=smooth_video_cc confidence=0.55\n",
-                    pkt->pid, old_cc, cc);
-        }
-    }
-}
-
-static uint64_t read_pts33(const uint8_t *p) {
-    return (((uint64_t)((p[0] >> 1) & 0x07)) << 30) |
-           ((uint64_t)p[1] << 22) |
-           (((uint64_t)((p[2] >> 1) & 0x7f)) << 15) |
-           ((uint64_t)p[3] << 7) |
-           ((uint64_t)((p[4] >> 1) & 0x7f));
-}
-
-static void write_pts33(uint8_t *p, uint64_t value) {
-    value &= 0x1ffffffffULL;
-    p[0] = (uint8_t)((p[0] & 0xf0) | (((value >> 30) & 0x07) << 1) | 1);
-    p[1] = (uint8_t)(value >> 22);
-    p[2] = (uint8_t)((((value >> 15) & 0x7f) << 1) | 1);
-    p[3] = (uint8_t)(value >> 7);
-    p[4] = (uint8_t)(((value & 0x7f) << 1) | 1);
-}
-
-static int64_t pts_delta(uint64_t newer, uint64_t older) {
-    int64_t d = (int64_t)((newer - older) & 0x1ffffffffULL);
-    if (d > (int64_t)0x100000000ULL) {
-        d -= (int64_t)0x200000000ULL;
-    }
-    return d;
-}
-
-static void write_pcr_base(uint8_t *p, uint64_t base) {
-    base &= 0x1ffffffffULL;
-    p[0] = (uint8_t)(base >> 25);
-    p[1] = (uint8_t)(base >> 17);
-    p[2] = (uint8_t)(base >> 9);
-    p[3] = (uint8_t)(base >> 1);
-    p[4] = (uint8_t)(((base & 1u) << 7) | 0x7e);
-    p[5] = 0;
-}
-
-static void clean_ts_smooth_timestamps(const PsiContext *psi, const TsPacket *pkt, uint8_t raw[TS_PACKET_SIZE],
-                                       TimestampRepairState *state, Stats *stats, int verbose) {
-    const uint64_t frame_ticks = 3600;
-    const uint64_t pcr_ticks = 3600;
-    const int64_t max_jump = 90000;
-
-    if (!pid_in_list(pkt->pid, psi->video_pids, psi->video_count)) {
-        return;
-    }
-
-    if (pkt->has_pcr && raw[3] >> 4 != 1 && raw[4] >= 7) {
-        uint64_t out = pkt->pcr_base;
-        int rewrite = 0;
-        if (!state->pcr_valid) {
-            state->pcr_valid = 1;
-            state->next_pcr = pkt->pcr_base + pcr_ticks;
-        } else {
-            int64_t d = pts_delta(pkt->pcr_base, state->next_pcr);
-            if (d < 0 || d > max_jump) {
-                out = state->next_pcr;
-                rewrite = 1;
-            }
-            state->next_pcr = out + pcr_ticks;
-        }
-        if (rewrite) {
-            write_pcr_base(&raw[6], out);
-            stats->clean_ts_pcr_rewrites++;
-            stats->repair_actions++;
-            if (verbose) {
-                fprintf(stderr,
-                        "[repair] action=rewrite_pcr pid=0x%04x old=%llu new=%llu reason=smooth_timestamp_outlier confidence=0.50\n",
-                        pkt->pid, (unsigned long long)pkt->pcr_base, (unsigned long long)out);
-            }
-        }
-    }
-
-    if (!pkt->payload_unit_start || !pkt->has_payload || pkt->payload_size < 14) {
-        return;
-    }
-    size_t off = pkt->payload_offset;
-    if (off + 14 > TS_PACKET_SIZE || raw[off] != 0x00 || raw[off + 1] != 0x00 || raw[off + 2] != 0x01) {
-        return;
-    }
-    uint8_t flags = (uint8_t)((raw[off + 7] >> 6) & 0x03);
-    uint8_t header_len = raw[off + 8];
-    if (!(flags & 0x02) || off + 9u + header_len > TS_PACKET_SIZE || off + 14 > TS_PACKET_SIZE) {
-        return;
-    }
-
-    uint64_t old_pts = read_pts33(&raw[off + 9]);
-    uint64_t new_pts = old_pts;
-    int rewrite_pts = 0;
-    if (!state->pts_valid) {
-        state->pts_valid = 1;
-        state->next_pts = old_pts + frame_ticks;
-    } else {
-        int64_t d = pts_delta(old_pts, state->next_pts);
-        if (d < 0 || d > max_jump) {
-            new_pts = state->next_pts;
-            rewrite_pts = 1;
-        }
-        state->next_pts = new_pts + frame_ticks;
-    }
-    if (rewrite_pts) {
-        write_pts33(&raw[off + 9], new_pts);
-        stats->clean_ts_pts_rewrites++;
-        stats->repair_actions++;
-        if (verbose) {
-            fprintf(stderr,
-                    "[repair] action=rewrite_pts pid=0x%04x old=%llu new=%llu reason=smooth_timestamp_outlier confidence=0.50\n",
-                    pkt->pid, (unsigned long long)old_pts, (unsigned long long)new_pts);
-        }
-    }
-    if ((flags & 0x01) && off + 19 <= TS_PACKET_SIZE) {
-        uint64_t old_dts = read_pts33(&raw[off + 14]);
-        uint64_t new_dts = new_pts;
-        if (rewrite_pts || pts_delta(old_dts, new_pts) < -max_jump || pts_delta(old_dts, new_pts) > max_jump) {
-            write_pts33(&raw[off + 14], new_dts);
-        }
-    }
+static int write_packet(void *userdata, const uint8_t *data, size_t size) {
+    return size == TS_PACKET_SIZE && ts_output_write_packet(userdata, data);
 }
 
 static int stdin_is_regular(void) {
@@ -617,6 +335,12 @@ static int stdin_is_regular(void) {
 }
 
 int main(int argc, char **argv) {
+    /* The recovered-view CLI shares the in-process C recovery library. */
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--contest-mode") ||
+            (!strcmp(argv[i], "--mode") && i+1 < argc && !strcmp(argv[i+1], "contest")))
+            return sf_contest_cli(argc, argv);
+    }
     Options opt;
     if (!parse_options(argc, argv, &opt)) {
         usage(stderr);
@@ -710,61 +434,52 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[repair] psi_inject=disabled reason=clean_ts_cadence_preserve\n");
     }
 
-    Stats stats;
-    PsiContext psi;
-    ContinuityContext continuity;
-    MlModel ml;
-    RepairContext repair;
-    ContestContext contest;
-    TsReader reader;
+    ScatterfixConfig config;
+    scatterfix_config_init(&config);
+    config.psi_interval_ms = opt.psi_interval_ms;
+    config.passthrough = opt.passthrough;
+    config.sanitize = opt.sanitize;
+    config.clean_ts = opt.clean_ts;
+    config.drop_audio = opt.drop_audio;
+    config.smooth_video_cc = opt.smooth_video_cc;
+    config.smooth_timestamps = opt.smooth_timestamps;
+    config.verbose = opt.verbose;
+    config.dry_run = opt.dry_run;
+    config.ml_enabled = opt.ml_enabled;
+    config.contest_mode = opt.contest_mode;
+    Scatterfix *engine = scatterfix_create(&config, write_packet, &output);
+    if (!engine) {
+        fprintf(stderr, "tsscatterfix: cannot allocate engine\n");
+        ts_output_close(&output);
+        ts_input_close(&input);
+        if (json_status_file != stderr) fclose(json_status_file);
+        if (out_file != stdout) fclose(out_file);
+        if (in_file != stdin) fclose(in_file);
+        ts_io_cleanup();
+        return 1;
+    }
+    scatterfix_load_state(engine, opt.ml_state_path);
     uint8_t raw[TS_PACKET_SIZE];
-    uint8_t clean_cc_valid[TS_PID_COUNT] = {0};
-    uint8_t clean_next_cc[TS_PID_COUNT] = {0};
-    uint8_t clean_video_cc_valid[TS_PID_COUNT] = {0};
-    uint8_t clean_video_next_cc[TS_PID_COUNT] = {0};
-    TimestampRepairState clean_ts_time = {0, 0, 0, 0};
     ResetKeyControl reset_key;
-    ResetControlContext reset_control;
-    uint64_t stats_index = 0;
-
-    stats_init(&stats);
-    psi_init(&psi);
-    continuity_init(&continuity);
-    contest_init(&contest);
-    ml_model_init(&ml, opt.ml_enabled, opt.contest_mode, opt.ml_state_path);
-    if (opt.contest_mode && opt.verbose) {
-        fprintf(stderr, "[contest] mode=enabled timing=async_recovered_view assumption=static_test_image repeat_window=%u payload_repair=planned\n",
-                ml.repeat_window);
-    }
-    if (ml_model_load(&ml) && opt.verbose) {
-        fprintf(stderr, "[ml] loaded state from %s\n", opt.ml_state_path);
-    }
-    repair_init(&repair, opt.psi_interval_ms, opt.verbose, opt.dry_run);
-    ts_reader_init(&reader, &input, opt.verbose);
     reset_key_open(&reset_key, opt.verbose);
-    reset_control.opt = &opt;
-    reset_control.reset_key = &reset_key;
-    reset_control.psi = &psi;
-    reset_control.continuity = &continuity;
-    reset_control.contest = &contest;
-    reset_control.ml = &ml;
-    reset_control.repair = &repair;
-    reset_control.clean_cc_valid = clean_cc_valid;
-    reset_control.clean_next_cc = clean_next_cc;
-    reset_control.clean_video_cc_valid = clean_video_cc_valid;
-    reset_control.clean_video_next_cc = clean_video_next_cc;
-    reset_control.clean_ts_time = &clean_ts_time;
-    reset_control.stats = &stats;
+    ResetControlContext reset_control = { &reset_key, engine };
     ts_input_set_poll_callback(&input, handle_reset_key, &reset_control);
+    uint64_t stats_index = 0;
+    int failed = 0;
+    uint64_t bytes_this_pass = 0;
 
     while (1) {
-        if (!ts_reader_next(&reader, raw, &stats)) {
+        size_t got = ts_input_read(&input, raw, sizeof(raw));
+        if (!got) {
+            if (input.kind == TS_IO_FILE && ferror(in_file)) { failed = 1; break; }
             if (opt.loop_input && opt.input_path && !opt.udp_input_port) {
+                if (!bytes_this_pass) break;
+                if (!scatterfix_finish(engine)) { failed = 1; break; }
                 if (fseek(in_file, 0, SEEK_SET) != 0) {
                     fprintf(stderr, "tsscatterfix: cannot loop input '%s': %s\n", opt.input_path, strerror(errno));
-                    break;
+                    failed = 1; break;
                 }
-                ts_reader_init(&reader, &input, opt.verbose);
+                bytes_this_pass = 0;
                 if (opt.verbose) {
                     fprintf(stderr, "[io] loop_input path=%s\n", opt.input_path);
                 }
@@ -772,136 +487,44 @@ int main(int argc, char **argv) {
             }
             break;
         }
+        bytes_this_pass += got;
         handle_reset_key(&reset_control);
-        TsPacket pkt;
-        if (!ts_packet_parse(raw, &pkt)) {
-            stats.invalid_packets++;
-            if ((opt.sanitize || opt.clean_ts) && !opt.passthrough) {
-                make_null_packet(raw);
-                stats.repair_actions++;
-                if (opt.clean_ts) {
-                    stats.clean_ts_null_packets++;
-                }
-                if (opt.verbose) {
-                    fprintf(stderr, "[repair] action=replace_with_null reason=invalid_ts_header confidence=0.85\n");
-                }
-            }
-            if (opt.verbose) {
-                fprintf(stderr, "[repair] action=%s reason=invalid_ts_header confidence=0.65\n",
-                        ((opt.sanitize || opt.clean_ts) && !opt.passthrough) ? "replace_with_null" : "pass");
-            }
-            if (!repair_write_packet(&repair, &output, raw, &stats)) {
-                fprintf(stderr, "tsscatterfix: write failed\n");
-                break;
-            }
-            continue;
-        }
-
-        if (!opt.passthrough && pkt.transport_error) {
-            stats.transport_error_packets++;
-            if (repair_replace_tei_from_cache(&repair, &psi, &pkt, raw, &stats)) {
-                if (!ts_packet_parse(raw, &pkt)) {
-                    stats.packets_dropped++;
-                    stats.invalid_packets++;
-                    continue;
-                }
-            } else if (opt.sanitize || opt.clean_ts) {
-                make_null_packet(raw);
-                stats.repair_actions++;
-                if (opt.clean_ts) {
-                    stats.clean_ts_null_packets++;
-                }
-                if (opt.verbose) {
-                    fprintf(stderr, "[repair] action=replace_with_null pid=0x%04x reason=unrepairable_tei confidence=0.80\n",
-                            pkt.pid);
-                }
-                if (!repair_write_packet(&repair, &output, raw, &stats)) {
-                    fprintf(stderr, "tsscatterfix: write failed\n");
-                    break;
-                }
-                continue;
-            }
-        }
-
-        if (opt.clean_ts && !opt.passthrough && clean_ts_replace_bad_psi(&psi, &pkt, raw, &stats, opt.verbose)) {
-            if (!ts_packet_parse(raw, &pkt)) {
-                stats.packets_dropped++;
-                stats.invalid_packets++;
-                continue;
-            }
-        }
-
-        continuity_observe(&continuity, &pkt, &stats, opt.verbose);
-        psi_observe_packet(&psi, &pkt, stats.packets_read, opt.verbose);
-        if (opt.contest_mode) {
-            contest_observe_packet(&contest, &pkt, &psi, stats.packets_read);
-        }
-        ml_model_observe(&ml, &pkt, &psi, &stats, stats.packets_read, opt.verbose);
-
-        if (opt.clean_ts && !opt.passthrough && !clean_ts_pid_allowed(&psi, pkt.pid, opt.drop_audio)) {
-            uint16_t filtered_pid = pkt.pid;
-            make_null_packet(raw);
-            stats.clean_ts_null_packets++;
-            stats.clean_ts_filtered_pids++;
-            stats.repair_actions++;
-            if (opt.verbose) {
-                fprintf(stderr,
-                        "[repair] action=replace_with_null pid=0x%04x reason=clean_ts_unknown_pid_after_pmt confidence=0.75\n",
-                        filtered_pid);
-            }
-        }
-
-        if (opt.clean_ts && !opt.passthrough) {
-            TsPacket out_pkt;
-            if (ts_packet_parse(raw, &out_pkt)) {
-                clean_ts_rewrite_psi_cc(&psi, &out_pkt, raw, clean_cc_valid, clean_next_cc, opt.verbose);
-                if (opt.smooth_video_cc) {
-                    clean_ts_rewrite_video_cc(&psi, &out_pkt, raw, clean_video_cc_valid,
-                                              clean_video_next_cc, &stats, opt.verbose);
-                }
-                if (opt.smooth_timestamps) {
-                    clean_ts_smooth_timestamps(&psi, &out_pkt, raw, &clean_ts_time, &stats, opt.verbose);
-                }
-            }
-        }
-
-        if (!opt.passthrough && !repair_maybe_inject_psi(&repair, &output, &psi, &stats)) {
-            fprintf(stderr, "tsscatterfix: write failed during PSI injection\n");
+        if (!scatterfix_feed(engine, raw, got)) {
+            fprintf(stderr, "tsscatterfix: processing/write failed\n");
+            failed = 1;
             break;
         }
-        if (!repair_write_packet(&repair, &output, raw, &stats)) {
-            fprintf(stderr, "tsscatterfix: write failed\n");
-            break;
-        }
-
-        if (opt.stats_interval > 0 && stats.packets_read % opt.stats_interval == 0) {
-            stats_print(stderr, &stats, &psi, ++stats_index);
-            ml_model_print_roles(stderr, &ml, &psi);
+        if (opt.stats_interval > 0 && scatterfix_stats(engine)->packets_read % opt.stats_interval == 0) {
+            stats_print(stderr, scatterfix_stats(engine), scatterfix_service(engine), ++stats_index);
+            scatterfix_print_roles(engine, stderr);
             if (opt.json_status) {
-                contest_print_json(json_status_file, &contest, &stats, &psi, stats_index);
+                scatterfix_print_status(engine, json_status_file, stats_index);
                 fflush(json_status_file);
             }
         }
-        if (opt.max_packets > 0 && stats.packets_read >= opt.max_packets) {
+        if (opt.max_packets > 0 && scatterfix_stats(engine)->packets_read >= opt.max_packets) {
             break;
         }
     }
 
+    if (!scatterfix_finish(engine)) failed = 1;
     if (opt.stats_interval > 0 || opt.verbose) {
-        stats_print(stderr, &stats, &psi, ++stats_index);
-        ml_model_print_roles(stderr, &ml, &psi);
+        stats_print(stderr, scatterfix_stats(engine), scatterfix_service(engine), ++stats_index);
+        scatterfix_print_roles(engine, stderr);
     }
     if (opt.json_status) {
-        contest_print_json(json_status_file, &contest, &stats, &psi, stats_index);
+        scatterfix_print_status(engine, json_status_file, stats_index);
         fflush(json_status_file);
     }
-    if (ml_model_save(&ml) < 0) {
+    if (scatterfix_save_state(engine, opt.ml_state_path) < 0) {
         fprintf(stderr, "tsscatterfix: cannot save ML state '%s': %s\n", opt.ml_state_path, strerror(errno));
     }
 
     if (!ts_output_flush(&output)) {
         fprintf(stderr, "tsscatterfix: output flush failed\n");
+        failed = 1;
     }
+    scatterfix_destroy(engine);
     reset_key_close(&reset_key);
     ts_output_close(&output);
     ts_input_close(&input);
@@ -909,5 +532,5 @@ int main(int argc, char **argv) {
     if (out_file && out_file != stdout) fclose(out_file);
     if (in_file && in_file != stdin) fclose(in_file);
     ts_io_cleanup();
-    return ferror(stdout) ? 1 : 0;
+    return failed || ferror(stdout) ? 1 : 0;
 }

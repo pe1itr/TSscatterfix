@@ -245,6 +245,10 @@ static int udp_send_buffer(TsOutput *output) {
 }
 
 int ts_output_write_packet(TsOutput *output, const uint8_t packet[TS_PACKET_SIZE]) {
+    if (output->kind == TS_IO_CALLBACK) {
+        return output->write_callback &&
+               output->write_callback(output->write_userdata, packet, TS_PACKET_SIZE);
+    }
     if (output->kind == TS_IO_FILE) {
         return fwrite(packet, 1, TS_PACKET_SIZE, output->file) == TS_PACKET_SIZE;
     }
@@ -258,10 +262,19 @@ int ts_output_write_packet(TsOutput *output, const uint8_t packet[TS_PACKET_SIZE
 }
 
 int ts_output_flush(TsOutput *output) {
+    if (output->kind == TS_IO_CALLBACK) return 1;
     if (output->kind == TS_IO_FILE) {
         return fflush(output->file) == 0;
     }
     return udp_send_buffer(output);
+}
+
+void ts_output_init_callback(TsOutput *output,
+                             int (*write)(void *, const uint8_t *, size_t), void *userdata) {
+    memset(output, 0, sizeof(*output));
+    output->kind = TS_IO_CALLBACK;
+    output->write_callback = write;
+    output->write_userdata = userdata;
 }
 
 void ts_output_close(TsOutput *output) {
